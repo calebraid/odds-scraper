@@ -262,6 +262,30 @@ h1 em{font-style:normal;background:linear-gradient(135deg,var(--green) 0%,#00cc7
 .copy-btn:hover{color:var(--text);border-color:rgba(255,255,255,.2)}
 .code-body{padding:1.25rem;font-family:'JetBrains Mono',monospace;font-size:.8rem;line-height:1.75;overflow-x:auto;max-height:380px;overflow-y:auto}
 
+/* ── Odds cards (demo panel) ── */
+.odds-panel{background:#0d1117;border:1px solid rgba(255,255,255,.07);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.odds-panel-hdr{display:flex;align-items:center;justify-content:space-between;padding:.7rem 1rem;background:rgba(255,255,255,.025);border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
+.live-label{display:inline-flex;align-items:center;gap:.35rem;color:var(--green);font-size:.7rem;font-family:'JetBrains Mono',monospace;font-weight:700;letter-spacing:1px}
+.odds-cards{padding:.875rem;display:flex;flex-direction:column;gap:.75rem;overflow-y:auto;max-height:380px}
+.game-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:1rem 1.125rem;transition:border-color .2s}
+.game-card:hover{border-color:rgba(0,255,136,.25)}
+.game-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:.875rem;gap:.5rem;flex-wrap:wrap}
+.game-matchup{font-size:.9rem;font-weight:700;color:var(--text);line-height:1.3}
+.game-status{font-size:.68rem;font-weight:700;letter-spacing:.5px;padding:.2rem .55rem;border-radius:4px;white-space:nowrap;flex-shrink:0}
+.status-live{background:rgba(255,80,80,.15);color:#ff6060;border:1px solid rgba(255,80,80,.3)}
+.status-upcoming{background:rgba(255,255,255,.06);color:var(--dim);border:1px solid rgba(255,255,255,.08)}
+.odds-cols{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem}
+.odds-col{background:rgba(255,255,255,.025);border-radius:7px;padding:.6rem .7rem}
+.odds-col-lbl{font-size:.65rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--green);margin-bottom:.5rem}
+.odds-row{display:flex;justify-content:space-between;align-items:center;padding:.15rem 0}
+.odds-row+.odds-row{border-top:1px solid rgba(255,255,255,.05)}
+.team-side{font-size:.7rem;color:var(--dim);font-weight:500}
+.odds-val{font-size:.8rem;font-weight:700;color:var(--text);font-family:'JetBrains Mono',monospace;text-align:right}
+.odds-val .muted{color:var(--dim);font-weight:400;font-size:.72rem;margin-left:.15rem}
+.odds-pos{color:var(--green)}
+.odds-neg{color:#ff8080}
+.odds-loading{padding:2rem;text-align:center;color:var(--dim);font-size:.875rem}
+
 /* syntax */
 .kw{color:#ff7b72}.str{color:#a5d6ff}.num{color:#79c0ff}.key{color:#d2a8ff}.green-hi{color:var(--green)}.gray{color:#6e7681}
 
@@ -409,12 +433,14 @@ footer{border-top:1px solid var(--border);padding:2.5rem 2rem;display:flex;align
         </div>
         <div class="code-body" id="curl-block"></div>
       </div>
-      <div class="code-box">
-        <div class="code-hdr">
-          <span class="code-lang">Response &middot; JSON</span>
-          <span class="green-hi" style="font-size:.7rem;font-family:'JetBrains Mono',monospace">200 OK</span>
+      <div class="odds-panel">
+        <div class="odds-panel-hdr">
+          <span class="code-lang">Live Response</span>
+          <span class="live-label"><span class="pulse"></span>LIVE</span>
         </div>
-        <div class="code-body" id="resp-block"><span class="gray">// Loading live data&hellip;</span></div>
+        <div class="odds-cards" id="odds-cards">
+          <div class="odds-loading">Loading live data&hellip;</div>
+        </div>
       </div>
     </div>
   </div>
@@ -509,26 +535,50 @@ async function updateDemo(){
     `<span class="kw">curl</span> <span class="str">${origin}/odds/${sport}</span> \\\\<br>&nbsp;&nbsp;<span class="kw">-H</span> <span class="str">"X-API-Key: YOUR_API_KEY"</span>`;
   try{
     const r=await fetch('/odds/preview');
-    if(r.ok){const d=await r.json();renderJson(d);return;}
+    if(r.ok){const d=await r.json();renderCards(d.games||[]);return;}
   }catch(_){}
-  renderJson({source:"DraftKings",league:"NBA",game_count:3,games:[
-    {matchup:"MIN Timberwolves @ SA Spurs",spread:{away:{line:"+4.5",odds:-110},home:{line:"-4.5",odds:-120}},moneyline:{away:180,home:-238},total:{over:{line:"197.5",odds:-120},under:{line:"197.5",odds:-110}}},
-  ]});
+  renderCards([
+    {matchup:"MIN Timberwolves @ SA Spurs",game_time:"3rd Quarter 3:08",spread:{away:{line:"+4.5",odds:-110},home:{line:"-4.5",odds:-120}},moneyline:{away:180,home:-238},total:{over:{line:"197.5",odds:-120},under:{line:"197.5",odds:-110}}},
+    {matchup:"CLE Cavaliers @ DET Pistons",game_time:"Tomorrow 6:10 PM",spread:{away:{line:"+3.5",odds:-115},home:{line:"-3.5",odds:-105}},moneyline:{away:124,home:-148},total:{over:{line:"215.5",odds:-105},under:{line:"215.5",odds:-115}}},
+    {matchup:"PHI 76ers @ NY Knicks",game_time:"Wed May 6th 6:10 PM",spread:{away:{line:"+7.5",odds:-115},home:{line:"-7.5",odds:-105}},moneyline:{away:225,home:-278},total:{over:{line:"214.5",odds:-110},under:{line:"214.5",odds:-110}}},
+  ]);
 }
 
-function renderJson(obj){
-  const json=JSON.stringify(obj,null,2);
-  const esc=json.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  document.getElementById('resp-block').innerHTML=esc.replace(
-    /("(\\\\u[a-zA-Z0-9]{4}|\\\\[^u]|[^\\\\"])*"(\\s*:)?|\\b(true|false|null)\\b|-?\\d+(?:\\.\\d*)?(?:[eE][+\\-]?\\d+)?)/g,
-    m=>{
-      let c='num';
-      if(/^"/.test(m)){if(/:$/.test(m)){return`<span class="key">${m}</span>`}c='str';}
-      else if(/true|false/.test(m))c='kw';
-      else if(/null/.test(m))c='gray';
-      return`<span class="${c}">${m}</span>`;
-    }
-  );
+function renderCards(games){
+  const el=document.getElementById('odds-cards');
+  if(!games.length){el.innerHTML='<div class="odds-loading">No games available.</div>';return;}
+  const fmt=n=>n==null?'N/A':n>0?'+'+n:String(n);
+  const mlCls=n=>n==null?'':n>0?'odds-pos':'odds-neg';
+  const isLive=t=>t&&/quarter|half|period|inning|OT/i.test(t);
+  el.innerHTML=games.map(g=>{
+    const[away,home]=g.matchup.split(' @ ');
+    const live=isLive(g.game_time);
+    const statusCls=live?'status-live':'status-upcoming';
+    const statusTxt=live?g.game_time:'Upcoming';
+    return`<div class="game-card">
+  <div class="game-hdr">
+    <span class="game-matchup">${away||''} <span style="color:var(--dim);font-weight:400">@</span> ${home||g.matchup}</span>
+    <span class="game-status ${statusCls}">${statusTxt}</span>
+  </div>
+  <div class="odds-cols">
+    <div class="odds-col">
+      <div class="odds-col-lbl">Spread</div>
+      <div class="odds-row"><span class="team-side">Away</span><span class="odds-val">${g.spread?.away?.line||'—'}<span class="muted">${g.spread?.away?.odds!=null?'('+g.spread.away.odds+')':''}</span></span></div>
+      <div class="odds-row"><span class="team-side">Home</span><span class="odds-val">${g.spread?.home?.line||'—'}<span class="muted">${g.spread?.home?.odds!=null?'('+g.spread.home.odds+')':''}</span></span></div>
+    </div>
+    <div class="odds-col">
+      <div class="odds-col-lbl">Moneyline</div>
+      <div class="odds-row"><span class="team-side">Away</span><span class="odds-val ${mlCls(g.moneyline?.away)}">${fmt(g.moneyline?.away)}</span></div>
+      <div class="odds-row"><span class="team-side">Home</span><span class="odds-val ${mlCls(g.moneyline?.home)}">${fmt(g.moneyline?.home)}</span></div>
+    </div>
+    <div class="odds-col">
+      <div class="odds-col-lbl">Total</div>
+      <div class="odds-row"><span class="team-side">Over</span><span class="odds-val">${g.total?.over?.line||'—'}<span class="muted">${g.total?.over?.odds!=null?'('+g.total.over.odds+')':''}</span></span></div>
+      <div class="odds-row"><span class="team-side">Under</span><span class="odds-val">${g.total?.under?.line||'—'}<span class="muted">${g.total?.under?.odds!=null?'('+g.total.under.odds+')':''}</span></span></div>
+    </div>
+  </div>
+</div>`;
+  }).join('');
 }
 
 function copyCmd(){
