@@ -143,143 +143,208 @@ async def scrape_game_lines(page) -> list[dict]:
 
 # ── Player Props ──────────────────────────────────────────────────────────────
 
-async def _wait_for_props_content(page) -> bool:
+DK_BASE = "https://sportsbook.draftkings.com"
+
+
+async def _get_event_urls(page) -> list[dict]:
+    """Return [{href, matchup}] from the props-tab game containers.
+
+    Each container is a non-collapsible wrapper whose only job is to link to
+    the real event page — the props themselves live there, not here.
+    We deduplicate by href so we don't scrape the same event twice (DK
+    sometimes renders the same link for 'More Bets' and the title).
+    """
+    events = await page.evaluate("""() => {
+        const seen = new Set();
+        const results = [];
+        for (const c of document.querySelectorAll('.cms-market-selector-static__event-wrapper')) {
+            // Primary nav link (title anchor, not SGP or 'More Bets' variant)
+            const link = c.querySelector('a[data-testid="lp-nav-link"], a.event-nav-link');
+            if (!link) continue;
+            const href = link.getAttribute('href') || '';
+            // Skip SGP mode links and already-seen hrefs
+            if (href.includes('sgpmode') || seen.has(href)) continue;
+            seen.add(href);
+            // Team names, if rendered (props tab may not show them)
+            const teamEls = c.querySelectorAll('.cb-market__label-inner--parlay');
+            const teams = [...teamEls].map(e => e.innerText.trim()).filter(Boolean);
+            const matchup = teams.length >= 2 ? teams[0] + ' @ ' + teams[1] : '';
+            results.push({ href, matchup });
+        }
+        return results;
+    }""")
+    return events
+
+
+async def _scrape_event_props(page, href: str, hint_matchup: str) -> dict | None:
+    """Visit one event page, navigate to the player-props tab, and extract odds.
+
+    Returns {matchup, markets: {market_name: [{player, line?, over_odds, under_odds}]}}
+    or None if nothing useful was found.
+    """
+    base_url = href if href.startswith("http") else DK_BASE + href
+    props_url = base_url + "?category=player-props"
+
+    try:
+        await page.goto(props_url, wait_until="domcontentloaded", timeout=30_000)
+    except PlaywrightTimeoutError:
+        print(f"    [event] timed out: {props_url}")
+        return None
+
+    # Wait for any recognised content container
+    found = False
     for sel in [
-        ".cms-market-selector-static__event-wrapper",
+        ".sportsbook-event-accordion__wrapper",
+        ".sportsbook-offer-category-panel",
+        ".sportsbook-table",
         "[data-testid='marketboard']",
-        ".cms-market-selector-content",
     ]:
         try:
-            await page.wait_for_selector(sel, timeout=10_000)
-            print(f"  [props] content ready ({sel})")
-            return True
+            await page.wait_for_selector(sel, timeout=8_000)
+            found = True
+            break
         except PlaywrightTimeoutError:
             continue
-    return False
 
+    if not found:
+        # Log a snippet to surface the actual structure in Railway logs
+        snippet = await page.evaluate(
+            "() => document.body.innerHTML.replace(/\\s+/g, ' ').trim().slice(0, 500)"
+        )
+        print(f"    [event] no content selector matched. body[:500]: {snippet}")
+        return None
 
-async def _extract_props_from_section(section) -> tuple[str, dict]:
-    """Walk a game container in DOM order via JS.
+    await asyncio.sleep(2)
 
-    The props tab shares cms-market-selector-static__event-wrapper with
-    game-lines. Inside, cb-market__template-parlay-header elements delimit
-    market groups (e.g. "Points", "Rebounds"); cb-market__label-inner
-    (without --parlay) holds player names; each player is followed by two
-    consecutive cb-market__button elements (over then under).
-    """
-    data = await section.evaluate("""(section) => {
+    data = await page.evaluate("""() => {
         function parseOdds(s) {
             if (!s) return null;
-            s = s.replace(/\\u2212|\\u2013/g, '-').trim();
+            s = s.replace(/[\\u2212\\u2013]/g, '-').trim();
             if (s === 'EVEN') return 100;
             const m = s.match(/[+\\-]?\\d+/);
             return m ? parseInt(m[0], 10) : null;
         }
 
-        // Matchup from team name labels (--parlay variant, same as game-lines)
-        const teamEls = section.querySelectorAll('.cb-market__label-inner--parlay');
-        const teams = [...teamEls].map(e => e.innerText.trim()).filter(Boolean);
-        const matchup = teams.length >= 2 ? teams[0] + ' @ ' + teams[1] : 'Unknown';
-
-        // Walk all relevant nodes in DOM order
-        const nodes = section.querySelectorAll(
-            '[class*="cb-market__template-parlay-header"],' +
-            '.cb-market__label-inner:not(.cb-market__label-inner--parlay),' +
-            '.cb-market__button'
+        // Matchup from page header
+        const hdrEl = document.querySelector(
+            '.event-cell__name-text, [class*="event-cell__name"], ' +
+            '.sportsbook-event-accordion__title, h1'
         );
+        const pageMatchup = hdrEl ? hdrEl.innerText.trim().replace(/\\s+/g, ' ') : null;
 
         const markets = {};
-        let currentMarket = null;
-        let pendingPlayer = null;
-        let pendingBtns = [];
 
-        function flush() {
-            if (!pendingPlayer || !currentMarket || pendingBtns.length < 1) return;
-            const over = pendingBtns[0];
-            const under = pendingBtns[1] || null;
-            const ptsEl = over.querySelector('.cb-market__button-points');
-            const pts = ptsEl ? ptsEl.innerText.trim() : null;
-            const line = pts !== null ? parseFloat(pts) : null;
-            const overOddsEl = over.querySelector('.cb-market__button-odds');
-            const underOddsEl = under ? under.querySelector('.cb-market__button-odds') : null;
-            const entry = { player: pendingPlayer };
-            if (!isNaN(line) && line !== null) entry.line = line;
-            entry.over_odds  = parseOdds(overOddsEl  ? overOddsEl.innerText  : null);
-            entry.under_odds = parseOdds(underOddsEl ? underOddsEl.innerText : null);
-            markets[currentMarket].push(entry);
+        // ── Strategy A: sportsbook-event-accordion (DK event-page layout) ──
+        for (const acc of document.querySelectorAll('.sportsbook-event-accordion__wrapper')) {
+            const hdr = acc.querySelector(
+                '.sportsbook-event-accordion__title, [class*="accordion__title"]'
+            );
+            const marketName = hdr ? hdr.innerText.trim() : null;
+            if (!marketName) continue;
+
+            const rows = acc.querySelectorAll('.sportsbook-table__row, [class*="table__row"]');
+            const outcomes = [];
+            for (const row of rows) {
+                const labelEl = row.querySelector(
+                    '.sportsbook-outcome-cell__label, [class*="outcome-cell__label"]'
+                );
+                const lineEl = row.querySelector(
+                    '.sportsbook-outcome-cell__line, [class*="outcome-cell__line"]'
+                );
+                const oddsEls = row.querySelectorAll(
+                    '.sportsbook-odds, [class*="sportsbook-odds"]'
+                );
+                const player = labelEl ? labelEl.innerText.trim() : null;
+                if (!player) continue;
+                const lineText = lineEl ? lineEl.innerText.trim() : null;
+                const line = lineText ? parseFloat(lineText) : null;
+                const entry = { player };
+                if (!isNaN(line) && line !== null) entry.line = line;
+                if (oddsEls.length >= 2) {
+                    entry.over_odds  = parseOdds(oddsEls[0].innerText);
+                    entry.under_odds = parseOdds(oddsEls[1].innerText);
+                } else if (oddsEls.length === 1) {
+                    entry.odds = parseOdds(oddsEls[0].innerText);
+                }
+                outcomes.push(entry);
+            }
+            if (outcomes.length) markets[marketName] = outcomes;
         }
 
-        for (const el of nodes) {
-            const cls = el.className || '';
-            if (cls.includes('parlay-header')) {
-                flush();
-                pendingPlayer = null;
-                pendingBtns = [];
-                currentMarket = el.innerText.trim().replace(/\\s+/g, ' ');
-                if (currentMarket && !markets[currentMarket]) markets[currentMarket] = [];
-            } else if (cls.includes('cb-market__label-inner')) {
-                flush();
-                pendingPlayer = el.innerText.trim();
-                pendingBtns = [];
-                if (!currentMarket) {
-                    currentMarket = 'Props';
-                    markets[currentMarket] = [];
+        // ── Strategy B: offer-category-panel (older / alternate DK layout) ──
+        if (!Object.keys(markets).length) {
+            for (const panel of document.querySelectorAll('.sportsbook-offer-category-panel')) {
+                const hdr = panel.querySelector(
+                    '[class*="panel__header"], [class*="category-header"], h4'
+                );
+                const marketName = hdr ? hdr.innerText.trim() : 'Props';
+                const rows = panel.querySelectorAll(
+                    '.sportsbook-table__row, [class*="table__row"]'
+                );
+                const outcomes = [];
+                for (const row of rows) {
+                    const labelEl = row.querySelector('[class*="outcome-cell__label"]');
+                    const oddsEls = row.querySelectorAll('[class*="sportsbook-odds"]');
+                    const player = labelEl ? labelEl.innerText.trim() : null;
+                    if (!player) continue;
+                    const entry = { player };
+                    if (oddsEls.length >= 2) {
+                        entry.over_odds  = parseOdds(oddsEls[0].innerText);
+                        entry.under_odds = parseOdds(oddsEls[1].innerText);
+                    }
+                    outcomes.push(entry);
                 }
-            } else if (cls.includes('cb-market__button')) {
-                pendingBtns.push(el);
+                if (outcomes.length) markets[marketName] = outcomes;
             }
         }
-        flush();
 
-        // Drop empty markets
-        for (const k of Object.keys(markets)) {
-            if (!markets[k].length) delete markets[k];
-        }
+        // Diagnostic snippet when both strategies yield nothing
+        const snippet = Object.keys(markets).length === 0
+            ? document.body.innerHTML.replace(/\\s+/g, ' ').trim().slice(0, 500)
+            : null;
 
-        return { matchup, markets };
+        return { pageMatchup, markets, snippet };
     }""")
 
-    return data.get("matchup", "Unknown"), data.get("markets", {})
+    if data.get("snippet"):
+        print(f"    [event] 0 markets. body[:500]: {data['snippet']}")
+        return None
+
+    matchup = data.get("pageMatchup") or hint_matchup or base_url
+    return {"matchup": matchup, "markets": data["markets"]}
 
 
 async def scrape_player_props(page) -> list[dict]:
     """Returns list of {matchup, markets: {market_name: [outcomes]}}."""
+    # Step 1: load the props tab to collect event page URLs
     try:
         await page.goto(NBA_PLAYER_PROPS, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_selector(".cms-market-selector-static__event-wrapper", timeout=15_000)
     except PlaywrightTimeoutError:
-        print("  [props] Navigation timed out.")
+        print("  [props] timed out loading props directory page.")
         return []
 
-    if not await _wait_for_props_content(page):
-        print("  [props] No recognisable content — skipping.")
-        if DEBUG:
-            _save_debug_html(await page.content(), "debug_player_props.html")
-        return []
+    await asyncio.sleep(2)
+    await scroll_to_bottom(page, ".cms-market-selector-static__event-wrapper")
 
-    await asyncio.sleep(3)
-    await scroll_to_bottom(page, ".cms-market-selector-static__event-wrapper", max_rounds=12)
+    events = await _get_event_urls(page)
+    print(f"  [props] {len(events)} event URL(s) found")
+    for e in events:
+        print(f"    {e.get('matchup') or '(matchup unknown)'} -> {e['href']}")
 
-    if DEBUG:
-        _save_debug_html(await page.content(), "debug_player_props.html")
-
-    game_sections = await page.query_selector_all(".cms-market-selector-static__event-wrapper")
-    print(f"  [props] {len(game_sections)} game section(s)")
+    # Step 2: visit each event page and scrape the props tab
     results = []
-
-    if game_sections:
-        snippet = await game_sections[0].evaluate(
-            "(el) => el.innerHTML.replace(/\\s+/g, ' ').trim().slice(0, 500)"
-        )
-        print(f"  [props] section[0] innerHTML[:500]: {snippet}")
-
-    for section in game_sections:
-        matchup, markets = await _extract_props_from_section(section)
-        if markets:
-            results.append({"matchup": matchup, "markets": markets})
-            market_names = list(markets.keys())
-            print(f"    {matchup}: {len(market_names)} markets — {', '.join(market_names[:6])}")
+    for event in events:
+        matchup = event.get("matchup", "")
+        label = matchup or event["href"]
+        print(f"  [props] scraping {label}")
+        result = await _scrape_event_props(page, event["href"], matchup)
+        if result:
+            names = list(result["markets"].keys())
+            print(f"    -> {len(names)} markets: {', '.join(names[:6])}")
+            results.append(result)
         else:
-            print(f"    {matchup}: 0 markets (no cb-* prop data found in container)")
+            print(f"    -> no props extracted")
 
     return results
 
