@@ -1,0 +1,23 @@
+# Secrets
+api_keys.json
+
+# Debug artifacts
+debug.py
+debug_page.html
+
+# Scraper output (written at runtime)
+odds/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Git
+.git
+.gitignore
+
+# Docker/Railway config (not needed inside the image)
+Dockerfile
+.dockerignore
+railway.toml

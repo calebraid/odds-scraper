@@ -1,0 +1,104 @@
+{
+  "source": "DraftKings",
+  "league": "NBA",
+  "scraped_at": "2026-05-05T03:21:04.386629+00:00",
+  "game_count": 3,
+  "games": [
+    {
+      "matchup": "MIN Timberwolves @ SA Spurs",
+      "away_team": "MIN Timberwolves",
+      "home_team": "SA Spurs",
+      "game_time": "3rd Quarter3:08\nMore Bets",
+      "score": {
+        "away": "64",
+        "home": "65"
+      },
+      "spread": {
+        "away": {
+          "line": "+4.5",
+          "odds": -110
+        },
+        "home": {
+          "line": "-4.5",
+          "odds": -120
+        }
+      },
+      "moneyline": {
+        "away": 180,
+        "home": -238
+      },
+      "total": {
+        "over": {
+          "line": "197.5",
+          "odds": -120
+        },
+        "under": {
+          "line": "197.5",
+          "odds": -110
+        }
+      }
+    },
+    {
+      "matchup": "CLE Cavaliers @ DET Pistons",
+      "away_team": "CLE Cavaliers",
+      "home_team": "DET Pistons",
+      "game_time": "Tomorrow 6:10 PM",
+      "score": null,
+      "spread": {
+        "away": {
+          "line": "+3.5",
+          "odds": -115
+        },
+        "home": {
+          "line": "-3.5",
+          "odds": -105
+        }
+      },
+      "moneyline": {
+        "away": 124,
+        "home": -148
+      },
+      "total": {
+        "over": {
+          "line": "215.5",
+          "odds": -105
+        },
+        "under": {
+          "line": "215.5",
+          "odds": -115
+        }
+      }
+    },
+    {
+      "matchup": "PHI 76ers @ NY Knicks",
+      "away_team": "PHI 76ers",
+      "home_team": "NY Knicks",
+      "game_time": "Wed May 6th 6:10 PM",
+      "score": null,
+      "spread": {
+        "away": {
+          "line": "+7.5",
+          "odds": -115
+        },
+        "home": {
+          "line": "-7.5",
+          "odds": -105
+        }
+      },
+      "moneyline": {
+        "away": 225,
+        "home": -278
+      },
+      "total": {
+        "over": {
+          "line": "214.5",
+          "odds": -110
+        },
+        "under": {
+          "line": "214.5",
+          "odds": -110
+        }
+      }
+    }
+  ]
+}
