@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 import re
 import sys
 from datetime import datetime, timezone
@@ -177,19 +178,49 @@ async def _get_event_urls(page) -> list[dict]:
 
 
 async def _scrape_event_props(page, href: str, hint_matchup: str) -> dict | None:
-    """Visit one event page, navigate to the player-props tab, and extract odds.
+    """Visit one event page, click the Player Props tab, and extract odds.
 
     Returns {matchup, markets: {market_name: [{player, line?, over_odds, under_odds}]}}
     or None if nothing useful was found.
     """
     base_url = href if href.startswith("http") else DK_BASE + href
-    props_url = base_url + "?category=player-props"
 
+    # Random inter-request delay so requests look human
+    await asyncio.sleep(random.uniform(2, 4))
+
+    # Navigate to the base event URL first (no query params) so DK sees a
+    # natural page load, not a direct deep-link that trips bot detection.
     try:
-        await page.goto(props_url, wait_until="domcontentloaded", timeout=30_000)
+        await page.goto(base_url, wait_until="domcontentloaded", timeout=30_000)
     except PlaywrightTimeoutError:
-        print(f"    [event] timed out: {props_url}")
+        print(f"    [event] timed out: {base_url}")
         return None
+
+    # Wait for the page shell to render before touching anything
+    await asyncio.sleep(random.uniform(1.5, 3))
+
+    # Find and click the Player Props tab if it exists.
+    # DK renders subcategory tabs as <a> elements whose text matches "Player Props".
+    props_tab = None
+    for tab_sel in [
+        "a.tab-switcher-tab",
+        "[data-testid='tab-switcher-tab-inner']",
+        "a[class*='tab-switcher-tab']",
+    ]:
+        tabs = await page.query_selector_all(tab_sel)
+        for tab in tabs:
+            text = (await tab.inner_text()).strip()
+            if "prop" in text.lower():
+                props_tab = tab
+                break
+        if props_tab:
+            break
+
+    if props_tab:
+        await props_tab.click()
+        await asyncio.sleep(random.uniform(1.5, 2.5))
+    else:
+        print(f"    [event] no props tab found, scraping default view")
 
     # Wait for any recognised content container
     found = False
@@ -200,21 +231,20 @@ async def _scrape_event_props(page, href: str, hint_matchup: str) -> dict | None
         "[data-testid='marketboard']",
     ]:
         try:
-            await page.wait_for_selector(sel, timeout=8_000)
+            await page.wait_for_selector(sel, timeout=10_000)
             found = True
             break
         except PlaywrightTimeoutError:
             continue
 
     if not found:
-        # Log a snippet to surface the actual structure in Railway logs
         snippet = await page.evaluate(
             "() => document.body.innerHTML.replace(/\\s+/g, ' ').trim().slice(0, 500)"
         )
         print(f"    [event] no content selector matched. body[:500]: {snippet}")
         return None
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(1.5)
 
     data = await page.evaluate("""() => {
         function parseOdds(s) {
@@ -389,7 +419,10 @@ async def main():
         print("  DEBUG: HTML snapshots saved to odds/")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -397,6 +430,19 @@ async def main():
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
             viewport={"width": 1280, "height": 900},
+            locale="en-US",
+            timezone_id="America/New_York",
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            },
+        )
+        # Mask navigator.webdriver so DK's bot checks don't see a headless flag
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         page = await context.new_page()
 
