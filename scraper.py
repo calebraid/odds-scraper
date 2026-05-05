@@ -142,239 +142,209 @@ async def scrape_game_lines(page) -> list[dict]:
     return games
 
 
-# ── Player Props ──────────────────────────────────────────────────────────────
+# ── Player Props (API interception) ──────────────────────────────────────────
 
-DK_BASE = "https://sportsbook.draftkings.com"
+# Subdomains DraftKings uses for its internal odds/event API.
+# We only parse JSON from these — skipping analytics, ads, etc.
+_DK_API_DOMAINS = ("sportsbook-nash.draftkings.com", "api.draftkings.com")
 
 
-async def _get_event_urls(page) -> list[dict]:
-    """Return [{href, matchup}] from the props-tab game containers.
+async def _intercept_props_api(page) -> list[tuple[str, any]]:
+    """Navigate to the player-props subcategory page and capture every JSON
+    response from DK's internal API domains.  The listener is registered
+    before navigation so no early calls are missed.
 
-    Each container is a non-collapsible wrapper whose only job is to link to
-    the real event page — the props themselves live there, not here.
-    We deduplicate by href so we don't scrape the same event twice (DK
-    sometimes renders the same link for 'More Bets' and the title).
+    Returns a list of (url, parsed_body) pairs, largest bodies first so the
+    main event-data response (usually the biggest) is tried first.
     """
-    events = await page.evaluate("""() => {
-        const seen = new Set();
-        const results = [];
-        for (const c of document.querySelectorAll('.cms-market-selector-static__event-wrapper')) {
-            // Primary nav link (title anchor, not SGP or 'More Bets' variant)
-            const link = c.querySelector('a[data-testid="lp-nav-link"], a.event-nav-link');
-            if (!link) continue;
-            const href = link.getAttribute('href') || '';
-            // Skip SGP mode links and already-seen hrefs
-            if (href.includes('sgpmode') || seen.has(href)) continue;
-            seen.add(href);
-            // Team names, if rendered (props tab may not show them)
-            const teamEls = c.querySelectorAll('.cb-market__label-inner--parlay');
-            const teams = [...teamEls].map(e => e.innerText.trim()).filter(Boolean);
-            const matchup = teams.length >= 2 ? teams[0] + ' @ ' + teams[1] : '';
-            results.push({ href, matchup });
-        }
-        return results;
-    }""")
-    return events
+    captured: list[tuple[str, any]] = []
 
-
-async def _scrape_event_props(page, href: str, hint_matchup: str) -> dict | None:
-    """Visit one event page, click the Player Props tab, and extract odds.
-
-    Returns {matchup, markets: {market_name: [{player, line?, over_odds, under_odds}]}}
-    or None if nothing useful was found.
-    """
-    base_url = href if href.startswith("http") else DK_BASE + href
-
-    # Random inter-request delay so requests look human
-    await asyncio.sleep(random.uniform(2, 4))
-
-    # Navigate to the base event URL first (no query params) so DK sees a
-    # natural page load, not a direct deep-link that trips bot detection.
-    try:
-        await page.goto(base_url, wait_until="domcontentloaded", timeout=30_000)
-    except PlaywrightTimeoutError:
-        print(f"    [event] timed out: {base_url}")
-        return None
-
-    # Wait for the page shell to render before touching anything
-    await asyncio.sleep(random.uniform(1.5, 3))
-
-    # Find and click the Player Props tab if it exists.
-    # DK renders subcategory tabs as <a> elements whose text matches "Player Props".
-    props_tab = None
-    for tab_sel in [
-        "a.tab-switcher-tab",
-        "[data-testid='tab-switcher-tab-inner']",
-        "a[class*='tab-switcher-tab']",
-    ]:
-        tabs = await page.query_selector_all(tab_sel)
-        for tab in tabs:
-            text = (await tab.inner_text()).strip()
-            if "prop" in text.lower():
-                props_tab = tab
-                break
-        if props_tab:
-            break
-
-    if props_tab:
-        await props_tab.click()
-        await asyncio.sleep(random.uniform(1.5, 2.5))
-    else:
-        print(f"    [event] no props tab found, scraping default view")
-
-    # Wait for any recognised content container
-    found = False
-    for sel in [
-        ".sportsbook-event-accordion__wrapper",
-        ".sportsbook-offer-category-panel",
-        ".sportsbook-table",
-        "[data-testid='marketboard']",
-    ]:
+    async def on_response(response):
+        if response.status != 200:
+            return
+        url = response.url
+        if not any(d in url for d in _DK_API_DOMAINS):
+            return
+        if "json" not in response.headers.get("content-type", ""):
+            return
         try:
-            await page.wait_for_selector(sel, timeout=10_000)
-            found = True
-            break
-        except PlaywrightTimeoutError:
-            continue
+            body = await response.json()
+        except Exception:
+            return
+        # Skip trivially small responses (analytics pings, feature flags, etc.)
+        body_str = json.dumps(body)
+        if len(body_str) < 500:
+            return
+        captured.append((url, body))
 
-    if not found:
-        snippet = await page.evaluate(
-            "() => document.body.innerHTML.replace(/\\s+/g, ' ').trim().slice(0, 500)"
+    page.on("response", on_response)
+    try:
+        await page.goto(NBA_PLAYER_PROPS, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_selector(
+            ".cms-market-selector-static__event-wrapper", timeout=15_000
         )
-        print(f"    [event] no content selector matched. body[:500]: {snippet}")
-        return None
+    except PlaywrightTimeoutError:
+        pass  # Carry on — API calls may still have fired
 
-    await asyncio.sleep(1.5)
+    # Extra wait + scroll to trigger any lazy-loaded prop requests
+    await asyncio.sleep(3)
+    await scroll_to_bottom(page, ".cms-market-selector-static__event-wrapper")
+    await asyncio.sleep(2)
 
-    data = await page.evaluate("""() => {
-        function parseOdds(s) {
-            if (!s) return null;
-            s = s.replace(/[\\u2212\\u2013]/g, '-').trim();
-            if (s === 'EVEN') return 100;
-            const m = s.match(/[+\\-]?\\d+/);
-            return m ? parseInt(m[0], 10) : null;
-        }
+    page.remove_listener("response", on_response)
 
-        // Matchup from page header
-        const hdrEl = document.querySelector(
-            '.event-cell__name-text, [class*="event-cell__name"], ' +
-            '.sportsbook-event-accordion__title, h1'
-        );
-        const pageMatchup = hdrEl ? hdrEl.innerText.trim().replace(/\\s+/g, ' ') : null;
+    # Largest responses first — the main odds payload is usually the biggest
+    captured.sort(key=lambda t: len(json.dumps(t[1])), reverse=True)
+    return captured
 
-        const markets = {};
 
-        // ── Strategy A: sportsbook-event-accordion (DK event-page layout) ──
-        for (const acc of document.querySelectorAll('.sportsbook-event-accordion__wrapper')) {
-            const hdr = acc.querySelector(
-                '.sportsbook-event-accordion__title, [class*="accordion__title"]'
-            );
-            const marketName = hdr ? hdr.innerText.trim() : null;
-            if (!marketName) continue;
+def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
+    """Parse player props out of captured DraftKings API responses.
 
-            const rows = acc.querySelectorAll('.sportsbook-table__row, [class*="table__row"]');
-            const outcomes = [];
-            for (const row of rows) {
-                const labelEl = row.querySelector(
-                    '.sportsbook-outcome-cell__label, [class*="outcome-cell__label"]'
-                );
-                const lineEl = row.querySelector(
-                    '.sportsbook-outcome-cell__line, [class*="outcome-cell__line"]'
-                );
-                const oddsEls = row.querySelectorAll(
-                    '.sportsbook-odds, [class*="sportsbook-odds"]'
-                );
-                const player = labelEl ? labelEl.innerText.trim() : null;
-                if (!player) continue;
-                const lineText = lineEl ? lineEl.innerText.trim() : null;
-                const line = lineText ? parseFloat(lineText) : null;
-                const entry = { player };
-                if (!isNaN(line) && line !== null) entry.line = line;
-                if (oddsEls.length >= 2) {
-                    entry.over_odds  = parseOdds(oddsEls[0].innerText);
-                    entry.under_odds = parseOdds(oddsEls[1].innerText);
-                } else if (oddsEls.length === 1) {
-                    entry.odds = parseOdds(oddsEls[0].innerText);
-                }
-                outcomes.push(entry);
-            }
-            if (outcomes.length) markets[marketName] = outcomes;
-        }
-
-        // ── Strategy B: offer-category-panel (older / alternate DK layout) ──
-        if (!Object.keys(markets).length) {
-            for (const panel of document.querySelectorAll('.sportsbook-offer-category-panel')) {
-                const hdr = panel.querySelector(
-                    '[class*="panel__header"], [class*="category-header"], h4'
-                );
-                const marketName = hdr ? hdr.innerText.trim() : 'Props';
-                const rows = panel.querySelectorAll(
-                    '.sportsbook-table__row, [class*="table__row"]'
-                );
-                const outcomes = [];
-                for (const row of rows) {
-                    const labelEl = row.querySelector('[class*="outcome-cell__label"]');
-                    const oddsEls = row.querySelectorAll('[class*="sportsbook-odds"]');
-                    const player = labelEl ? labelEl.innerText.trim() : null;
-                    if (!player) continue;
-                    const entry = { player };
-                    if (oddsEls.length >= 2) {
-                        entry.over_odds  = parseOdds(oddsEls[0].innerText);
-                        entry.under_odds = parseOdds(oddsEls[1].innerText);
+    DK's sportsbook-nash API response shape (as of 2024-2026):
+      {
+        "eventGroup": {
+          "events": [
+            {
+              "eventId": ...,
+              "name": "Team A @ Team B",       # or teamName1/teamName2
+              "eventCategories": [
+                {
+                  "name": "Player Props",
+                  "componentizedOffers": [
+                    {
+                      "subcategoryName": "Points",
+                      "offers": [
+                        {
+                          "outcomes": [
+                            {
+                              "participant": "Anthony Edwards",
+                              "label": "Over",
+                              "oddsAmerican": "-115",
+                              "line": 25.5
+                            },
+                            { "participant": "...", "label": "Under", ... }
+                          ]
+                        }
+                      ]
                     }
-                    outcomes.push(entry);
+                  ]
                 }
-                if (outcomes.length) markets[marketName] = outcomes;
+              ]
             }
+          ]
         }
+      }
+    """
+    results: list[dict] = []
+    seen_matchups: set[str] = set()
 
-        // Diagnostic snippet when both strategies yield nothing
-        const snippet = Object.keys(markets).length === 0
-            ? document.body.innerHTML.replace(/\\s+/g, ' ').trim().slice(0, 500)
-            : null;
+    def coerce_odds(val) -> int | None:
+        if val is None:
+            return None
+        return parse_american_odds(str(val))
 
-        return { pageMatchup, markets, snippet };
-    }""")
+    for url, body in captured:
+        # Unwrap top-level envelope
+        if not isinstance(body, dict):
+            continue
+        eg = body.get("eventGroup") or {}
+        events = eg.get("events") or body.get("events") or []
 
-    if data.get("snippet"):
-        print(f"    [event] 0 markets. body[:500]: {data['snippet']}")
-        return None
+        for event in events:
+            if not isinstance(event, dict):
+                continue
 
-    matchup = data.get("pageMatchup") or hint_matchup or base_url
-    return {"matchup": matchup, "markets": data["markets"]}
+            # Build matchup label
+            name = (event.get("name") or "").strip()
+            if not name:
+                t1 = event.get("teamName1") or (event.get("homeTeam") or {}).get("name", "")
+                t2 = event.get("teamName2") or (event.get("awayTeam") or {}).get("name", "")
+                name = f"{t2} @ {t1}" if t1 and t2 else ""
+            if not name or name in seen_matchups:
+                continue
+
+            markets: dict[str, list] = {}
+
+            for cat in (event.get("eventCategories") or []):
+                cat_name = (cat.get("name") or cat.get("nameIdentifier") or "").lower()
+                if "prop" not in cat_name:
+                    continue
+
+                for comp in (cat.get("componentizedOffers") or []):
+                    market_name = (
+                        comp.get("subcategoryName")
+                        or comp.get("name")
+                        or "Props"
+                    )
+                    outcomes_list: list[dict] = []
+
+                    for offer in (comp.get("offers") or []):
+                        raw_outcomes = offer.get("outcomes") or []
+
+                        # Group by participant so each player becomes one row
+                        by_player: dict[str, dict] = {}
+                        for o in raw_outcomes:
+                            player = (
+                                o.get("participant")
+                                or o.get("label", "").split(" Over ")[0].split(" Under ")[0]
+                            ).strip()
+                            if not player:
+                                continue
+                            label = (o.get("label") or o.get("type") or "").lower()
+                            odds = coerce_odds(o.get("oddsAmerican") or o.get("odds"))
+                            line = o.get("line")
+
+                            entry = by_player.setdefault(player, {"player": player})
+                            if "over" in label:
+                                entry["over_odds"] = odds
+                                if line is not None:
+                                    try:
+                                        entry["line"] = float(line)
+                                    except (ValueError, TypeError):
+                                        pass
+                            elif "under" in label:
+                                entry["under_odds"] = odds
+                            else:
+                                entry["odds"] = odds
+
+                        for entry in by_player.values():
+                            if entry.get("over_odds") is not None or entry.get("odds") is not None:
+                                outcomes_list.append(entry)
+
+                    if outcomes_list:
+                        markets[market_name] = outcomes_list
+
+            if markets:
+                seen_matchups.add(name)
+                results.append({"matchup": name, "markets": markets})
+
+    return results
 
 
 async def scrape_player_props(page) -> list[dict]:
-    """Returns list of {matchup, markets: {market_name: [outcomes]}}."""
-    # Step 1: load the props tab to collect event page URLs
-    try:
-        await page.goto(NBA_PLAYER_PROPS, wait_until="domcontentloaded", timeout=30_000)
-        await page.wait_for_selector(".cms-market-selector-static__event-wrapper", timeout=15_000)
-    except PlaywrightTimeoutError:
-        print("  [props] timed out loading props directory page.")
-        return []
+    """Intercept DraftKings' internal API calls to extract player props.
 
-    await asyncio.sleep(2)
-    await scroll_to_bottom(page, ".cms-market-selector-static__event-wrapper")
+    This avoids navigating to individual event pages (which DK blocks for
+    headless browsers) by capturing the JSON the league page fetches itself.
+    """
+    captured = await _intercept_props_api(page)
 
-    events = await _get_event_urls(page)
-    print(f"  [props] {len(events)} event URL(s) found")
-    for e in events:
-        print(f"    {e.get('matchup') or '(matchup unknown)'} -> {e['href']}")
+    print(f"  [props] intercepted {len(captured)} API response(s)")
+    for url, body in captured:
+        eg = body.get("eventGroup", {}) if isinstance(body, dict) else {}
+        n_events = len(eg.get("events") or body.get("events") or [])
+        print(f"    {url}")
+        print(f"      top-level keys: {list(body.keys()) if isinstance(body, dict) else 'list'}"
+              f"  events: {n_events}")
 
-    # Step 2: visit each event page and scrape the props tab
-    results = []
-    for event in events:
-        matchup = event.get("matchup", "")
-        label = matchup or event["href"]
-        print(f"  [props] scraping {label}")
-        result = await _scrape_event_props(page, event["href"], matchup)
-        if result:
-            names = list(result["markets"].keys())
-            print(f"    -> {len(names)} markets: {', '.join(names[:6])}")
-            results.append(result)
-        else:
-            print(f"    -> no props extracted")
+    results = _parse_dk_api_props(captured)
+
+    if not results and captured:
+        # Dump the first (largest) response body for selector diagnosis
+        url, body = captured[0]
+        print(f"  [props] parse found 0 results — dumping first response ({url}):")
+        print(f"    {json.dumps(body)[:800]}")
 
     return results
 
