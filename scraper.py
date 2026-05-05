@@ -143,45 +143,14 @@ async def scrape_game_lines(page) -> list[dict]:
 
 # ── Player Props ──────────────────────────────────────────────────────────────
 
-# Game-section selectors: most- to least-specific.
-# The props tab reuses the same outer game-wrapper as game-lines, then uses
-# either sportsbook-table (older DK layout) or cb-* tables inside.
-_PROP_GAME_SELECTORS = [
-    ".sportsbook-event-accordion__wrapper",
-    "[class*='event-accordion__wrapper']",
-    "[class*='event-accordion']",
-    ".cms-market-selector-static__event-wrapper",  # same wrapper as game-lines
-    "[data-testid='componentid-210']",              # known componentid for game blocks
-]
-
-_PROP_MARKET_SELECTORS = [
-    ".sportsbook-offer-category-panel",
-    "[class*='offer-category-panel']",
-    "[class*='market-category']",
-    "[class*='offer-category']",
-    ".cb-market__template",                         # cb-* table header on props tab
-    "[class*='cb-market__template']",
-]
-
-_PROP_ROW_SELECTORS = [
-    ".sportsbook-table__row",
-    "[class*='table__row']",
-    "[class*='outcome-row']",
-    ".cb-market__button",                           # props may reuse game-lines button rows
-]
-
-
 async def _wait_for_props_content(page) -> bool:
-    candidates = [
-        ".sportsbook-event-accordion__wrapper",
-        ".sportsbook-table",
+    for sel in [
         ".cms-market-selector-static__event-wrapper",
         "[data-testid='marketboard']",
         ".cms-market-selector-content",
-    ]
-    for sel in candidates:
+    ]:
         try:
-            await page.wait_for_selector(sel, timeout=8_000)
+            await page.wait_for_selector(sel, timeout=10_000)
             print(f"  [props] content ready ({sel})")
             return True
         except PlaywrightTimeoutError:
@@ -189,59 +158,88 @@ async def _wait_for_props_content(page) -> bool:
     return False
 
 
-async def _log_props_page_classes(page) -> None:
-    """Emit the first 30 unique class tokens found inside the marketboard — used
-    to diagnose selector mismatches without needing a full HTML dump."""
-    try:
-        raw = await page.evaluate("""() => {
-            const board = document.querySelector('[data-testid="marketboard"]')
-                       || document.querySelector('.cms-market-selector-content')
-                       || document.body;
-            const seen = new Set();
-            for (const el of board.querySelectorAll('[class]')) {
-                for (const cls of el.className.split(' ')) {
-                    if (cls) seen.add(cls);
-                    if (seen.size >= 30) return [...seen];
+async def _extract_props_from_section(section) -> tuple[str, dict]:
+    """Walk a game container in DOM order via JS.
+
+    The props tab shares cms-market-selector-static__event-wrapper with
+    game-lines. Inside, cb-market__template-parlay-header elements delimit
+    market groups (e.g. "Points", "Rebounds"); cb-market__label-inner
+    (without --parlay) holds player names; each player is followed by two
+    consecutive cb-market__button elements (over then under).
+    """
+    data = await section.evaluate("""(section) => {
+        function parseOdds(s) {
+            if (!s) return null;
+            s = s.replace(/\\u2212|\\u2013/g, '-').trim();
+            if (s === 'EVEN') return 100;
+            const m = s.match(/[+\\-]?\\d+/);
+            return m ? parseInt(m[0], 10) : null;
+        }
+
+        // Matchup from team name labels (--parlay variant, same as game-lines)
+        const teamEls = section.querySelectorAll('.cb-market__label-inner--parlay');
+        const teams = [...teamEls].map(e => e.innerText.trim()).filter(Boolean);
+        const matchup = teams.length >= 2 ? teams[0] + ' @ ' + teams[1] : 'Unknown';
+
+        // Walk all relevant nodes in DOM order
+        const nodes = section.querySelectorAll(
+            '[class*="cb-market__template-parlay-header"],' +
+            '.cb-market__label-inner:not(.cb-market__label-inner--parlay),' +
+            '.cb-market__button'
+        );
+
+        const markets = {};
+        let currentMarket = null;
+        let pendingPlayer = null;
+        let pendingBtns = [];
+
+        function flush() {
+            if (!pendingPlayer || !currentMarket || pendingBtns.length < 1) return;
+            const over = pendingBtns[0];
+            const under = pendingBtns[1] || null;
+            const ptsEl = over.querySelector('.cb-market__button-points');
+            const pts = ptsEl ? ptsEl.innerText.trim() : null;
+            const line = pts !== null ? parseFloat(pts) : null;
+            const overOddsEl = over.querySelector('.cb-market__button-odds');
+            const underOddsEl = under ? under.querySelector('.cb-market__button-odds') : null;
+            const entry = { player: pendingPlayer };
+            if (!isNaN(line) && line !== null) entry.line = line;
+            entry.over_odds  = parseOdds(overOddsEl  ? overOddsEl.innerText  : null);
+            entry.under_odds = parseOdds(underOddsEl ? underOddsEl.innerText : null);
+            markets[currentMarket].push(entry);
+        }
+
+        for (const el of nodes) {
+            const cls = el.className || '';
+            if (cls.includes('parlay-header')) {
+                flush();
+                pendingPlayer = null;
+                pendingBtns = [];
+                currentMarket = el.innerText.trim().replace(/\\s+/g, ' ');
+                if (currentMarket && !markets[currentMarket]) markets[currentMarket] = [];
+            } else if (cls.includes('cb-market__label-inner')) {
+                flush();
+                pendingPlayer = el.innerText.trim();
+                pendingBtns = [];
+                if (!currentMarket) {
+                    currentMarket = 'Props';
+                    markets[currentMarket] = [];
                 }
+            } else if (cls.includes('cb-market__button')) {
+                pendingBtns.push(el);
             }
-            return [...seen];
-        }""")
-        print(f"  [props] classes on page: {raw}")
-    except Exception as exc:
-        print(f"  [props] class probe failed: {exc}")
+        }
+        flush();
 
+        // Drop empty markets
+        for (const k of Object.keys(markets)) {
+            if (!markets[k].length) delete markets[k];
+        }
 
-async def extract_prop_outcome(row_el) -> dict | None:
-    label_el = (
-        await row_el.query_selector(".sportsbook-outcome-cell__label")
-        or await row_el.query_selector("[class*='outcome-cell__label']")
-    )
-    player = await _text(label_el)
-    if not player:
-        return None
+        return { matchup, markets };
+    }""")
 
-    line_el = (
-        await row_el.query_selector(".sportsbook-outcome-cell__line")
-        or await row_el.query_selector("[class*='outcome-cell__line']")
-    )
-    line_text = await _text(line_el)
-    try:
-        line = float(line_text) if line_text else None
-    except ValueError:
-        line = None
-
-    odds_els = await row_el.query_selector_all(".sportsbook-odds, [class*='sportsbook-odds']")
-    odds_vals = [parse_american_odds(await _text(o)) for o in odds_els]
-
-    result: dict = {"player": player}
-    if line is not None:
-        result["line"] = line
-    if len(odds_vals) >= 2:
-        result["over_odds"] = odds_vals[0]
-        result["under_odds"] = odds_vals[1]
-    elif len(odds_vals) == 1:
-        result["odds"] = odds_vals[0]
-    return result
+    return data.get("matchup", "Unknown"), data.get("markets", {})
 
 
 async def scrape_player_props(page) -> list[dict]:
@@ -254,98 +252,28 @@ async def scrape_player_props(page) -> list[dict]:
 
     if not await _wait_for_props_content(page):
         print("  [props] No recognisable content — skipping.")
-        await _log_props_page_classes(page)
         if DEBUG:
             _save_debug_html(await page.content(), "debug_player_props.html")
         return []
 
     await asyncio.sleep(3)
-
-    # Discover which game-section selector the page uses
-    game_sel = None
-    for sel in _PROP_GAME_SELECTORS:
-        if await page.query_selector(sel):
-            game_sel = sel
-            print(f"  [props] game selector: {sel!r}")
-            break
-
-    if not game_sel:
-        print("  [props] No game sections found — selector tuning needed.")
-        await _log_props_page_classes(page)
-        if DEBUG:
-            _save_debug_html(await page.content(), "debug_player_props.html")
-        return []
-
-    await scroll_to_bottom(page, game_sel, max_rounds=12)
+    await scroll_to_bottom(page, ".cms-market-selector-static__event-wrapper", max_rounds=12)
 
     if DEBUG:
         _save_debug_html(await page.content(), "debug_player_props.html")
 
-    game_sections = await page.query_selector_all(game_sel)
-    print(f"  [props] {len(game_sections)} game section(s) found with {game_sel!r}")
-    if not game_sections:
-        await _log_props_page_classes(page)
+    game_sections = await page.query_selector_all(".cms-market-selector-static__event-wrapper")
+    print(f"  [props] {len(game_sections)} game section(s)")
     results = []
 
     for section in game_sections:
-        # Try to grab the matchup from the section header
-        header_el = None
-        for h_sel in [
-            ".sportsbook-event-accordion__title",
-            "[class*='accordion__title']",
-            ".event-cell__name-text",
-            "[class*='event-cell__name']",
-        ]:
-            header_el = await section.query_selector(h_sel)
-            if header_el:
-                break
-        matchup = re.sub(r"\s+", " ", (await _text(header_el) or "Unknown")).strip()
-
-        markets: dict[str, list] = {}
-
-        # Try to find market-category panels
-        market_panel_sel = None
-        for sel in _PROP_MARKET_SELECTORS:
-            panels = await section.query_selector_all(sel)
-            if panels:
-                market_panel_sel = sel
-                break
-
-        panels = await section.query_selector_all(market_panel_sel) if market_panel_sel else []
-
-        for panel in panels:
-            name_el = None
-            for n_sel in [
-                ".sportsbook-offer-category-panel__header",
-                "[class*='category-header']",
-                "[class*='panel-header']",
-                "[class*='category-title']",
-                "h4",
-            ]:
-                name_el = await panel.query_selector(n_sel)
-                if name_el:
-                    break
-            market_name = (await _text(name_el) or "Unknown").strip()
-
-            row_sel = None
-            for sel in _PROP_ROW_SELECTORS:
-                rows = await panel.query_selector_all(sel)
-                if rows:
-                    row_sel = sel
-                    break
-
-            rows = await panel.query_selector_all(row_sel) if row_sel else []
-            outcomes = []
-            for row in rows:
-                outcome = await extract_prop_outcome(row)
-                if outcome:
-                    outcomes.append(outcome)
-
-            if outcomes:
-                markets[market_name] = outcomes
-
+        matchup, markets = await _extract_props_from_section(section)
         if markets:
             results.append({"matchup": matchup, "markets": markets})
+            market_names = list(markets.keys())
+            print(f"    {matchup}: {len(market_names)} markets — {', '.join(market_names[:6])}")
+        else:
+            print(f"    {matchup}: 0 markets (no cb-* prop data found in container)")
 
     return results
 
