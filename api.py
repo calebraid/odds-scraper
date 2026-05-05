@@ -153,6 +153,30 @@ def get_preview_odds():
         return JSONResponse(content={"games": []})
 
 
+@app.get("/odds/{sport}/props", summary="Player props for a specific sport")
+def get_sport_props(sport: str, auth: Annotated[dict, Depends(authenticate)], response: Response):
+    _set_rate_limit_headers(response, auth)
+    slug = sport.lower()
+    if slug not in SPORT_FILES:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sport '{sport}' not found. Available: {list(SPORT_FILES.keys())}",
+        )
+    data = load_odds(SPORT_FILES[slug])
+    props = data.get("player_props", [])
+    warning = staleness_warning(data.get("scraped_at"))
+    result = {
+        "source": data.get("source"),
+        "league": data.get("league"),
+        "scraped_at": data.get("scraped_at"),
+        "game_count": len(props),
+        "player_props": props,
+    }
+    if warning:
+        result["warning"] = warning
+    return JSONResponse(content=result, headers=dict(response.headers))
+
+
 @app.get("/odds/{sport}", summary="Odds for a specific sport")
 def get_sport_odds(sport: str, auth: Annotated[dict, Depends(authenticate)], response: Response):
     _set_rate_limit_headers(response, auth)
