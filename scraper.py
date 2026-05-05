@@ -266,6 +266,12 @@ async def scrape_player_props(page) -> list[dict]:
     print(f"  [props] {len(game_sections)} game section(s)")
     results = []
 
+    if game_sections:
+        snippet = await game_sections[0].evaluate(
+            "(el) => el.innerHTML.replace(/\\s+/g, ' ').trim().slice(0, 500)"
+        )
+        print(f"  [props] section[0] innerHTML[:500]: {snippet}")
+
     for section in game_sections:
         matchup, markets = await _extract_props_from_section(section)
         if markets:
