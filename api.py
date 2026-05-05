@@ -262,6 +262,30 @@ h1 em{font-style:normal;background:linear-gradient(135deg,var(--green) 0%,#00cc7
 .copy-btn:hover{color:var(--text);border-color:rgba(255,255,255,.2)}
 .code-body{padding:1.25rem;font-family:'JetBrains Mono',monospace;font-size:.8rem;line-height:1.75;overflow-x:auto;max-height:380px;overflow-y:auto}
 
+/* ── API Tester panel ── */
+.tester-panel{background:#0d1117;border:1px solid rgba(255,255,255,.07);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.tester-hdr{display:flex;align-items:center;justify-content:space-between;padding:.7rem 1rem;background:rgba(255,255,255,.025);border-bottom:1px solid rgba(255,255,255,.06);gap:.75rem}
+.tester-hdr-left{display:flex;align-items:center;gap:.625rem;min-width:0}
+.method-badge{background:rgba(0,255,136,.12);color:var(--green);border:1px solid rgba(0,255,136,.3);padding:.15rem .5rem;border-radius:4px;font-size:.67rem;font-weight:800;letter-spacing:1px;font-family:'JetBrains Mono',monospace;flex-shrink:0}
+.tester-endpoint{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tester-status{font-size:.7rem;font-family:'JetBrains Mono',monospace;font-weight:700;white-space:nowrap;flex-shrink:0;letter-spacing:.5px}
+.status-ok{color:var(--green)}
+.status-err{color:#ff8080}
+.tester-body{padding:1.25rem;display:flex;flex-direction:column;gap:1rem;flex:1}
+.tester-label{display:block;font-size:.68rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);margin-bottom:.4rem}
+.key-input-row{display:flex;gap:.5rem}
+.key-input{flex:1;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:.6rem .875rem;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:.8rem;outline:none;transition:border-color .2s;min-width:0}
+.key-input:focus{border-color:rgba(0,255,136,.4);background:rgba(255,255,255,.06)}
+.key-input::placeholder{color:rgba(255,255,255,.22)}
+.try-demo-btn{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:var(--dim);padding:.6rem .875rem;border-radius:6px;cursor:pointer;font-size:.78rem;font-weight:600;white-space:nowrap;font-family:inherit;transition:all .2s;flex-shrink:0}
+.try-demo-btn:hover{color:var(--green);border-color:rgba(0,255,136,.35);background:rgba(0,255,136,.06)}
+.fetch-btn{background:var(--green);color:#000;border:none;border-radius:8px;padding:.85rem 1rem;font-size:.9375rem;font-weight:700;cursor:pointer;font-family:inherit;transition:all .25s;box-shadow:0 0 25px rgba(0,255,136,.2);width:100%;display:flex;align-items:center;justify-content:center;gap:.5rem}
+.fetch-btn:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 0 45px rgba(0,255,136,.45)}
+.fetch-btn:disabled{opacity:.55;cursor:not-allowed;transform:none;box-shadow:none}
+.tester-meta{font-size:.76rem;color:var(--dim);min-height:1.1em;font-family:'JetBrains Mono',monospace;line-height:1.5}
+.spin{display:inline-block;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
 /* ── Odds cards (demo panel) ── */
 .odds-panel{background:#0d1117;border:1px solid rgba(255,255,255,.07);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
 .odds-panel-hdr{display:flex;align-items:center;justify-content:space-between;padding:.7rem 1rem;background:rgba(255,255,255,.025);border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
@@ -426,12 +450,27 @@ footer{border-top:1px solid var(--border);padding:2.5rem 2rem;display:flex;align
       <button class="sport-btn" disabled title="Coming soon">&#9917; MLB &mdash; Soon</button>
     </div>
     <div class="demo-grid fade-up">
-      <div class="code-box">
-        <div class="code-hdr">
-          <span class="code-lang">curl</span>
-          <button class="copy-btn" id="copy-btn" onclick="copyCmd()">Copy</button>
+      <div class="tester-panel">
+        <div class="tester-hdr">
+          <div class="tester-hdr-left">
+            <span class="method-badge">GET</span>
+            <span class="tester-endpoint" id="tester-endpoint">/odds/nba</span>
+          </div>
+          <span class="tester-status" id="tester-status"></span>
         </div>
-        <div class="code-body" id="curl-block"></div>
+        <div class="tester-body">
+          <div>
+            <label class="tester-label" for="api-key-input">X-API-Key</label>
+            <div class="key-input-row">
+              <input type="text" id="api-key-input" class="key-input" placeholder="Paste your API key&hellip;" autocomplete="off" spellcheck="false">
+              <button class="try-demo-btn" onclick="fillDemoKey()">Try Free Key</button>
+            </div>
+          </div>
+          <button class="fetch-btn" id="fetch-btn" onclick="fetchOdds()">
+            <span id="fetch-label">&#9889; Fetch Live Odds</span>
+          </button>
+          <div class="tester-meta" id="tester-meta"></div>
+        </div>
       </div>
       <div class="odds-panel">
         <div class="odds-panel-hdr">
@@ -519,29 +558,67 @@ footer{border-top:1px solid var(--border);padding:2.5rem 2rem;display:flex;align
   track.innerHTML=html+html+html;
 })();
 
-// ── Demo ─────────────────────────────────────────────────────────────────────
+// ── API Tester ────────────────────────────────────────────────────────────────
 let sport='nba';
+const DEMO_KEY='free_demo_preview';
 
 function selectSport(s,btn){
   sport=s;
   document.querySelectorAll('.sport-btn').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
-  updateDemo();
+  document.getElementById('tester-endpoint').textContent='/odds/'+s;
 }
 
-async function updateDemo(){
-  const origin=window.location.origin;
-  document.getElementById('curl-block').innerHTML=
-    `<span class="kw">curl</span> <span class="str">${origin}/odds/${sport}</span> \\\\<br>&nbsp;&nbsp;<span class="kw">-H</span> <span class="str">"X-API-Key: YOUR_API_KEY"</span>`;
+function fillDemoKey(){
+  const inp=document.getElementById('api-key-input');
+  inp.value=DEMO_KEY;
+  inp.focus();
+  inp.select();
+}
+
+async function fetchOdds(){
+  const key=document.getElementById('api-key-input').value.trim();
+  const btn=document.getElementById('fetch-btn');
+  const lbl=document.getElementById('fetch-label');
+  const statusEl=document.getElementById('tester-status');
+  const metaEl=document.getElementById('tester-meta');
+  const cardsEl=document.getElementById('odds-cards');
+
+  btn.disabled=true;
+  lbl.innerHTML='<span class="spin">&#9696;</span> Fetching&hellip;';
+  cardsEl.innerHTML='<div class="odds-loading">Fetching live odds&hellip;</div>';
+  statusEl.className='tester-status';
+  statusEl.textContent='';
+  metaEl.textContent='';
+
+  const t0=performance.now();
   try{
-    const r=await fetch('/odds/preview');
-    if(r.ok){const d=await r.json();renderCards(d.games||[]);return;}
-  }catch(_){}
-  renderCards([
-    {matchup:"MIN Timberwolves @ SA Spurs",game_time:"3rd Quarter 3:08",spread:{away:{line:"+4.5",odds:-110},home:{line:"-4.5",odds:-120}},moneyline:{away:180,home:-238},total:{over:{line:"197.5",odds:-120},under:{line:"197.5",odds:-110}}},
-    {matchup:"CLE Cavaliers @ DET Pistons",game_time:"Tomorrow 6:10 PM",spread:{away:{line:"+3.5",odds:-115},home:{line:"-3.5",odds:-105}},moneyline:{away:124,home:-148},total:{over:{line:"215.5",odds:-105},under:{line:"215.5",odds:-115}}},
-    {matchup:"PHI 76ers @ NY Knicks",game_time:"Wed May 6th 6:10 PM",spread:{away:{line:"+7.5",odds:-115},home:{line:"-7.5",odds:-105}},moneyline:{away:225,home:-278},total:{over:{line:"214.5",odds:-110},under:{line:"214.5",odds:-110}}},
-  ]);
+    const usePreview=!key||key===DEMO_KEY;
+    const url=usePreview?'/odds/preview':'/odds/'+sport;
+    const opts=usePreview?{}:{headers:{'X-API-Key':key}};
+    const r=await fetch(url,opts);
+    const ms=Math.round(performance.now()-t0);
+    const data=await r.json();
+    if(r.ok){
+      statusEl.className='tester-status status-ok';
+      statusEl.textContent=r.status+' OK';
+      const games=data.games||[];
+      metaEl.textContent='Responded in '+ms+'ms · '+games.length+' game'+(games.length!==1?'s':'');
+      renderCards(games);
+    }else{
+      statusEl.className='tester-status status-err';
+      statusEl.textContent=r.status+' Error';
+      metaEl.textContent=data.detail||'Request failed';
+      cardsEl.innerHTML='<div class="odds-loading">'+(data.detail||'Error fetching odds.')+'</div>';
+    }
+  }catch(_){
+    statusEl.className='tester-status status-err';
+    statusEl.textContent='Network Error';
+    metaEl.textContent='Could not reach the API';
+    cardsEl.innerHTML='<div class="odds-loading">Network error — check your connection.</div>';
+  }
+  btn.disabled=false;
+  lbl.innerHTML='&#9889; Fetch Live Odds';
 }
 
 function renderCards(games){
@@ -581,15 +658,7 @@ function renderCards(games){
   }).join('');
 }
 
-function copyCmd(){
-  const origin=window.location.origin;
-  navigator.clipboard.writeText(`curl ${origin}/odds/${sport} -H "X-API-Key: YOUR_API_KEY"`).catch(()=>{});
-  const btn=document.getElementById('copy-btn');
-  btn.textContent='Copied!';
-  setTimeout(()=>btn.textContent='Copy',2000);
-}
-
-updateDemo();
+fetchOdds();
 
 // ── Scroll fade-in ────────────────────────────────────────────────────────────
 const obs=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');obs.unobserve(e.target);}}),{threshold:.1});
