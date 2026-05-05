@@ -143,11 +143,15 @@ async def scrape_game_lines(page) -> list[dict]:
 
 # ── Player Props ──────────────────────────────────────────────────────────────
 
-# Ordered from most- to least-specific so we stop on the first that works.
+# Game-section selectors: most- to least-specific.
+# The props tab reuses the same outer game-wrapper as game-lines, then uses
+# either sportsbook-table (older DK layout) or cb-* tables inside.
 _PROP_GAME_SELECTORS = [
     ".sportsbook-event-accordion__wrapper",
     "[class*='event-accordion__wrapper']",
     "[class*='event-accordion']",
+    ".cms-market-selector-static__event-wrapper",  # same wrapper as game-lines
+    "[data-testid='componentid-210']",              # known componentid for game blocks
 ]
 
 _PROP_MARKET_SELECTORS = [
@@ -155,12 +159,15 @@ _PROP_MARKET_SELECTORS = [
     "[class*='offer-category-panel']",
     "[class*='market-category']",
     "[class*='offer-category']",
+    ".cb-market__template",                         # cb-* table header on props tab
+    "[class*='cb-market__template']",
 ]
 
 _PROP_ROW_SELECTORS = [
     ".sportsbook-table__row",
     "[class*='table__row']",
     "[class*='outcome-row']",
+    ".cb-market__button",                           # props may reuse game-lines button rows
 ]
 
 
@@ -168,6 +175,7 @@ async def _wait_for_props_content(page) -> bool:
     candidates = [
         ".sportsbook-event-accordion__wrapper",
         ".sportsbook-table",
+        ".cms-market-selector-static__event-wrapper",
         "[data-testid='marketboard']",
         ".cms-market-selector-content",
     ]
@@ -179,6 +187,28 @@ async def _wait_for_props_content(page) -> bool:
         except PlaywrightTimeoutError:
             continue
     return False
+
+
+async def _log_props_page_classes(page) -> None:
+    """Emit the first 30 unique class tokens found inside the marketboard — used
+    to diagnose selector mismatches without needing a full HTML dump."""
+    try:
+        raw = await page.evaluate("""() => {
+            const board = document.querySelector('[data-testid="marketboard"]')
+                       || document.querySelector('.cms-market-selector-content')
+                       || document.body;
+            const seen = new Set();
+            for (const el of board.querySelectorAll('[class]')) {
+                for (const cls of el.className.split(' ')) {
+                    if (cls) seen.add(cls);
+                    if (seen.size >= 30) return [...seen];
+                }
+            }
+            return [...seen];
+        }""")
+        print(f"  [props] classes on page: {raw}")
+    except Exception as exc:
+        print(f"  [props] class probe failed: {exc}")
 
 
 async def extract_prop_outcome(row_el) -> dict | None:
@@ -224,6 +254,7 @@ async def scrape_player_props(page) -> list[dict]:
 
     if not await _wait_for_props_content(page):
         print("  [props] No recognisable content — skipping.")
+        await _log_props_page_classes(page)
         if DEBUG:
             _save_debug_html(await page.content(), "debug_player_props.html")
         return []
@@ -240,6 +271,7 @@ async def scrape_player_props(page) -> list[dict]:
 
     if not game_sel:
         print("  [props] No game sections found — selector tuning needed.")
+        await _log_props_page_classes(page)
         if DEBUG:
             _save_debug_html(await page.content(), "debug_player_props.html")
         return []
@@ -250,6 +282,9 @@ async def scrape_player_props(page) -> list[dict]:
         _save_debug_html(await page.content(), "debug_player_props.html")
 
     game_sections = await page.query_selector_all(game_sel)
+    print(f"  [props] {len(game_sections)} game section(s) found with {game_sel!r}")
+    if not game_sections:
+        await _log_props_page_classes(page)
     results = []
 
     for section in game_sections:
