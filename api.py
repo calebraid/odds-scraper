@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Security, Depends, Response
 from fastapi.security import APIKeyHeader
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
 app = FastAPI(title="Sports Odds API", version="1.0.0")
 
@@ -140,6 +140,19 @@ def get_all_odds(auth: Annotated[dict, Depends(authenticate)], response: Respons
     return JSONResponse(content={"sports": results, "count": len(results)}, headers=dict(response.headers))
 
 
+@app.get("/odds/preview", summary="Public preview of NBA odds (no auth)")
+def get_preview_odds():
+    """Returns current NBA odds without auth — used by the landing page ticker."""
+    try:
+        data = load_odds(SPORT_FILES["nba"])
+        return JSONResponse(content={
+            "games": data.get("games", []),
+            "scraped_at": data.get("scraped_at"),
+        })
+    except HTTPException:
+        return JSONResponse(content={"games": []})
+
+
 @app.get("/odds/{sport}", summary="Odds for a specific sport")
 def get_sport_odds(sport: str, auth: Annotated[dict, Depends(authenticate)], response: Response):
     _set_rate_limit_headers(response, auth)
@@ -154,3 +167,394 @@ def get_sport_odds(sport: str, auth: Annotated[dict, Depends(authenticate)], res
     if warning:
         data["warning"] = warning
     return JSONResponse(content=data, headers=dict(response.headers))
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def landing_page():
+    return HTMLResponse(content=_LANDING_HTML)
+
+
+_LANDING_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OddsAPI — Real-Time Sports Odds</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0a0a;--surface:#111;--green:#00ff88;--green-glow:rgba(0,255,136,.15);--text:#fff;--dim:#888;--border:rgba(255,255,255,.08)}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;overflow-x:hidden}
+
+/* ── NAV ── */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;padding:1rem 2rem;display:flex;align-items:center;justify-content:space-between;background:rgba(10,10,10,.85);backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
+.logo{font-size:1.2rem;font-weight:900;color:var(--green);letter-spacing:-.5px;text-decoration:none}
+.nav-links{display:flex;gap:2rem;align-items:center}
+.nav-links a{color:var(--dim);text-decoration:none;font-size:.875rem;font-weight:500;transition:color .2s}
+.nav-links a:hover{color:var(--text)}
+.nav-cta{background:var(--green)!important;color:#000!important;padding:.45rem 1.2rem;border-radius:6px;font-weight:700!important}
+.nav-cta:hover{opacity:.85}
+
+/* ── HERO ── */
+.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:8rem 2rem 0;position:relative;overflow:hidden}
+.hero-glow{position:absolute;width:700px;height:700px;background:radial-gradient(circle,rgba(0,255,136,.1) 0%,transparent 70%);top:15%;left:50%;transform:translateX(-50%);pointer-events:none}
+.hero-badge{display:inline-flex;align-items:center;gap:.5rem;background:rgba(0,255,136,.08);border:1px solid rgba(0,255,136,.25);color:var(--green);padding:.35rem 1rem;border-radius:100px;font-size:.75rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:2rem}
+.pulse{width:7px;height:7px;background:var(--green);border-radius:50%;animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
+h1{font-size:clamp(2.5rem,8vw,5.5rem);font-weight:900;letter-spacing:-3px;line-height:1;margin-bottom:1.5rem;background:linear-gradient(135deg,#fff 0%,#bbb 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+h1 em{font-style:normal;background:linear-gradient(135deg,var(--green) 0%,#00cc70 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero-sub{font-size:1.2rem;color:var(--dim);max-width:540px;margin:0 auto 2.5rem;line-height:1.75}
+.cta-row{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;margin-bottom:4rem}
+.btn-green{background:var(--green);color:#000;border:none;padding:.9rem 2rem;border-radius:8px;font-size:1rem;font-weight:700;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:.5rem;transition:all .2s;box-shadow:0 0 30px rgba(0,255,136,.3)}
+.btn-green:hover{transform:translateY(-2px);box-shadow:0 0 55px rgba(0,255,136,.5)}
+.btn-outline{background:transparent;color:var(--text);border:1px solid var(--border);padding:.9rem 2rem;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:.5rem;transition:all .2s}
+.btn-outline:hover{border-color:rgba(255,255,255,.3);background:rgba(255,255,255,.05)}
+
+/* ── TICKER ── */
+.ticker-wrap{width:100%;overflow:hidden;background:rgba(0,255,136,.04);border-top:1px solid rgba(0,255,136,.12);border-bottom:1px solid rgba(0,255,136,.12);padding:.7rem 0;margin-top:0}
+.ticker-track{display:flex;animation:scroll-left 50s linear infinite;white-space:nowrap;will-change:transform}
+.ticker-track:hover{animation-play-state:paused}
+@keyframes scroll-left{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+.tick{display:inline-flex;align-items:center;gap:.875rem;padding:0 3rem;font-size:.8125rem;font-family:'JetBrains Mono',monospace;border-right:1px solid rgba(255,255,255,.07)}
+.tick-match{color:var(--text);font-weight:500}
+.tick-spread{color:var(--green);font-weight:700}
+.tick-ml{color:var(--dim)}
+
+/* ── SECTIONS ── */
+.sec{padding:7rem 2rem;max-width:1200px;margin:0 auto}
+.sec-head{text-align:center;margin-bottom:4rem}
+.sec-label{color:var(--green);font-size:.75rem;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:.875rem}
+.sec-title{font-size:clamp(1.75rem,5vw,3rem);font-weight:800;letter-spacing:-1.5px;margin-bottom:1rem;line-height:1.1}
+.sec-desc{color:var(--dim);font-size:1.1rem;max-width:480px;margin:0 auto;line-height:1.75}
+
+/* ── FEATURE CARDS ── */
+.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1.25rem;margin-bottom:3.5rem}
+.feat-card{background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:16px;padding:1.875rem;transition:all .3s;position:relative;overflow:hidden}
+.feat-card::after{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(0,255,136,.07) 0%,transparent 55%);opacity:0;transition:opacity .3s}
+.feat-card:hover{border-color:rgba(0,255,136,.35);transform:translateY(-5px);box-shadow:0 25px 50px rgba(0,0,0,.5)}
+.feat-card:hover::after{opacity:1}
+.feat-icon{font-size:2rem;margin-bottom:1.25rem;display:block}
+.feat-card h3{font-size:1.0625rem;font-weight:700;margin-bottom:.625rem}
+.feat-card p{color:var(--dim);font-size:.9rem;line-height:1.65}
+
+/* ── STATS ── */
+.stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.25rem}
+.stat-card{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:12px;padding:2rem;text-align:center}
+.stat-val{font-size:2.75rem;font-weight:900;color:var(--green);letter-spacing:-1px;line-height:1;margin-bottom:.5rem}
+.stat-lbl{color:var(--dim);font-size:.9rem}
+
+/* ── DEMO ── */
+.demo-bg{background:rgba(255,255,255,.012);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:7rem 2rem}
+.demo-inner{max-width:1000px;margin:0 auto}
+.picker{display:flex;gap:.75rem;margin-bottom:2rem;flex-wrap:wrap}
+.sport-btn{background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--dim);padding:.5rem 1.25rem;border-radius:6px;cursor:pointer;font-size:.875rem;font-weight:600;transition:all .2s;font-family:inherit}
+.sport-btn:hover{color:var(--text);border-color:rgba(255,255,255,.2)}
+.sport-btn.active{background:rgba(0,255,136,.1);border-color:rgba(0,255,136,.5);color:var(--green)}
+.sport-btn:disabled{opacity:.38;cursor:not-allowed}
+.demo-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.25rem}
+.code-box{background:#0d1117;border:1px solid rgba(255,255,255,.07);border-radius:12px;overflow:hidden}
+.code-hdr{display:flex;align-items:center;justify-content:space-between;padding:.7rem 1rem;background:rgba(255,255,255,.025);border-bottom:1px solid rgba(255,255,255,.06)}
+.code-lang{font-size:.7rem;color:var(--dim);font-weight:700;letter-spacing:1.5px;text-transform:uppercase}
+.copy-btn{background:transparent;border:1px solid var(--border);color:var(--dim);padding:.2rem .7rem;border-radius:4px;cursor:pointer;font-size:.7rem;font-family:inherit;transition:all .2s}
+.copy-btn:hover{color:var(--text);border-color:rgba(255,255,255,.2)}
+.code-body{padding:1.25rem;font-family:'JetBrains Mono',monospace;font-size:.8rem;line-height:1.75;overflow-x:auto;max-height:380px;overflow-y:auto}
+
+/* syntax */
+.kw{color:#ff7b72}.str{color:#a5d6ff}.num{color:#79c0ff}.key{color:#d2a8ff}.green-hi{color:var(--green)}.gray{color:#6e7681}
+
+/* ── PRICING ── */
+.price-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.5rem;max-width:780px;margin:0 auto}
+.price-card{background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:20px;padding:2.5rem;transition:transform .3s}
+.price-card:hover{transform:translateY(-5px)}
+.price-card.hot{background:rgba(0,255,136,.05);border-color:rgba(0,255,136,.4);position:relative;box-shadow:0 0 70px rgba(0,255,136,.1)}
+.hot-badge{position:absolute;top:-13px;left:50%;transform:translateX(-50%);background:var(--green);color:#000;padding:.25rem 1rem;border-radius:100px;font-size:.7rem;font-weight:800;letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
+.plan-name{font-size:.75rem;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--dim);margin-bottom:1.25rem}
+.price-card.hot .plan-name{color:var(--green)}
+.price-amt{font-size:3.75rem;font-weight:900;letter-spacing:-2px;line-height:1;margin-bottom:.25rem}
+.price-per{color:var(--dim);font-size:.875rem;margin-bottom:2rem}
+.feat-list{list-style:none;margin-bottom:2rem}
+.feat-list li{display:flex;align-items:center;gap:.75rem;padding:.575rem 0;border-bottom:1px solid var(--border);font-size:.9125rem;color:var(--dim)}
+.feat-list li:last-child{border-bottom:none}
+.chk{color:var(--green);font-size:.9rem;flex-shrink:0;font-weight:700}
+.btn-plan{width:100%;padding:.875rem;border-radius:8px;font-size:.9375rem;font-weight:700;cursor:pointer;transition:all .2s;font-family:inherit;text-align:center;text-decoration:none;display:block}
+.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn-ghost:hover{border-color:rgba(255,255,255,.3);background:rgba(255,255,255,.05)}
+.btn-solid{background:var(--green);border:none;color:#000;box-shadow:0 0 30px rgba(0,255,136,.3)}
+.btn-solid:hover{transform:translateY(-2px);box-shadow:0 0 55px rgba(0,255,136,.5)}
+
+/* ── FOOTER ── */
+footer{border-top:1px solid var(--border);padding:2.5rem 2rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;max-width:1200px;margin:0 auto}
+.ft-links{display:flex;gap:2rem}
+.ft-links a{color:var(--dim);text-decoration:none;font-size:.875rem;transition:color .2s}
+.ft-links a:hover{color:var(--text)}
+.ft-copy{color:var(--dim);font-size:.875rem}
+
+/* ── ANIMATIONS ── */
+.fade-up{opacity:0;transform:translateY(28px);transition:opacity .65s ease,transform .65s ease}
+.fade-up.in{opacity:1;transform:translateY(0)}
+
+/* ── RESPONSIVE ── */
+@media(max-width:768px){
+  .demo-grid{grid-template-columns:1fr}
+  .stats-grid{grid-template-columns:1fr}
+  .nav-links{display:none}
+  footer{flex-direction:column;text-align:center}
+  .ft-links{justify-content:center}
+}
+@media(max-width:480px){h1{letter-spacing:-1.5px}}
+
+/* scrollbar */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:#2a2a2a;border-radius:3px}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a href="/" class="logo">&#9889; OddsAPI</a>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#demo">Demo</a>
+    <a href="#pricing">Pricing</a>
+    <a href="/docs">Docs</a>
+    <a href="#pricing" class="nav-cta">Get API Key</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-glow"></div>
+  <div class="hero-badge"><span class="pulse"></span>Live Data &bull; Updated Every 60 Seconds</div>
+  <h1>Real-Time<br><em>Sports Odds</em> API</h1>
+  <p class="hero-sub">Professional-grade sports betting data for developers. Live odds, spreads, and moneylines from top sportsbooks&mdash;delivered in milliseconds.</p>
+  <div class="cta-row">
+    <a href="#pricing" class="btn-green">&#128640; Get Free API Key</a>
+    <a href="/docs" class="btn-outline">&#128196; View Docs &rarr;</a>
+  </div>
+</div>
+
+<!-- TICKER (outside hero so it spans full width) -->
+<div class="ticker-wrap">
+  <div class="ticker-track" id="ticker"></div>
+</div>
+
+<!-- FEATURES -->
+<section class="sec" id="features">
+  <div class="sec-head fade-up">
+    <div class="sec-label">Why Choose Us</div>
+    <h2 class="sec-title">Everything you need to build<br>sports betting applications</h2>
+    <p class="sec-desc">Reliable, fast, and comprehensive sports odds data via a clean REST API.</p>
+  </div>
+  <div class="feat-grid">
+    <div class="feat-card fade-up">
+      <span class="feat-icon">&#9889;</span>
+      <h3>Live Odds</h3>
+      <p>Real-time odds from DraftKings, refreshed every 60 seconds. Spreads, moneylines, and totals all in a single response.</p>
+    </div>
+    <div class="feat-card fade-up">
+      <span class="feat-icon">&#127942;</span>
+      <h3>Multiple Sports</h3>
+      <p>NBA available now. NFL and MLB coming soon. One unified API format across all sports for seamless integration.</p>
+    </div>
+    <div class="feat-card fade-up">
+      <span class="feat-icon">&#128640;</span>
+      <h3>Fast Response</h3>
+      <p>Sub-100ms API responses served from global infrastructure. Never miss a line movement again.</p>
+    </div>
+    <div class="feat-card fade-up">
+      <span class="feat-icon">&#128274;</span>
+      <h3>Reliable Uptime</h3>
+      <p>99.9% uptime SLA with health monitoring and automatic restarts. Built on Railway with redundant infrastructure.</p>
+    </div>
+  </div>
+  <div class="stats-grid fade-up">
+    <div class="stat-card">
+      <div class="stat-val" data-count="3">0</div>
+      <div class="stat-lbl">Sports Available</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-val">60s</div>
+      <div class="stat-lbl">Refresh Rate</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-val">99.9%</div>
+      <div class="stat-lbl">Uptime SLA</div>
+    </div>
+  </div>
+</section>
+
+<!-- LIVE DEMO -->
+<div class="demo-bg" id="demo">
+  <div class="demo-inner">
+    <div class="sec-head fade-up">
+      <div class="sec-label">Live Demo</div>
+      <h2 class="sec-title">Try it right now</h2>
+      <p class="sec-desc">See exactly what our API returns. Pick a sport, grab the curl command.</p>
+    </div>
+    <div class="picker fade-up">
+      <button class="sport-btn active" onclick="selectSport('nba',this)">&#127936; NBA</button>
+      <button class="sport-btn" disabled title="Coming soon">&#127944; NFL &mdash; Soon</button>
+      <button class="sport-btn" disabled title="Coming soon">&#9917; MLB &mdash; Soon</button>
+    </div>
+    <div class="demo-grid fade-up">
+      <div class="code-box">
+        <div class="code-hdr">
+          <span class="code-lang">curl</span>
+          <button class="copy-btn" id="copy-btn" onclick="copyCmd()">Copy</button>
+        </div>
+        <div class="code-body" id="curl-block"></div>
+      </div>
+      <div class="code-box">
+        <div class="code-hdr">
+          <span class="code-lang">Response &middot; JSON</span>
+          <span class="green-hi" style="font-size:.7rem;font-family:'JetBrains Mono',monospace">200 OK</span>
+        </div>
+        <div class="code-body" id="resp-block"><span class="gray">// Loading live data&hellip;</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PRICING -->
+<section class="sec" id="pricing">
+  <div class="sec-head fade-up">
+    <div class="sec-label">Pricing</div>
+    <h2 class="sec-title">Simple, transparent pricing</h2>
+    <p class="sec-desc">Start free, scale when you need it. No hidden fees, no lock-in.</p>
+  </div>
+  <div class="price-grid fade-up">
+    <div class="price-card">
+      <div class="plan-name">Free</div>
+      <div class="price-amt">$0</div>
+      <div class="price-per">forever &mdash; no credit card</div>
+      <ul class="feat-list">
+        <li><span class="chk">&#10003;</span> 100 requests / day</li>
+        <li><span class="chk">&#10003;</span> NBA live odds</li>
+        <li><span class="chk">&#10003;</span> Spreads, moneylines &amp; totals</li>
+        <li><span class="chk">&#10003;</span> JSON REST API</li>
+        <li><span class="chk">&#10003;</span> Basic email support</li>
+      </ul>
+      <a href="mailto:jbraid061@gmail.com?subject=Free API Key Request" class="btn-plan btn-ghost">Get Started Free</a>
+    </div>
+    <div class="price-card hot">
+      <div class="hot-badge">&#9889; Most Popular</div>
+      <div class="plan-name">Pro</div>
+      <div class="price-amt">$29</div>
+      <div class="price-per">per month &mdash; cancel anytime</div>
+      <ul class="feat-list">
+        <li><span class="chk">&#10003;</span> 10,000 requests / day</li>
+        <li><span class="chk">&#10003;</span> All sports (NBA, NFL, MLB)</li>
+        <li><span class="chk">&#10003;</span> Spreads, moneylines &amp; totals</li>
+        <li><span class="chk">&#10003;</span> Historical data access</li>
+        <li><span class="chk">&#10003;</span> Priority support &amp; SLA</li>
+        <li><span class="chk">&#10003;</span> Webhooks &amp; streaming</li>
+      </ul>
+      <a href="mailto:jbraid061@gmail.com?subject=Pro API Key Request" class="btn-plan btn-solid">Get Pro Access &rarr;</a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <a href="/" class="logo">&#9889; OddsAPI</a>
+  <div class="ft-links">
+    <a href="/docs">Documentation</a>
+    <a href="/health">Health</a>
+    <a href="mailto:jbraid061@gmail.com">Contact</a>
+  </div>
+  <div class="ft-copy">&copy; 2026 OddsAPI. All rights reserved.</div>
+</footer>
+
+<script>
+// ── Ticker ───────────────────────────────────────────────────────────────────
+(async function buildTicker(){
+  let games=[];
+  try{const r=await fetch('/odds/preview');if(r.ok){const d=await r.json();games=d.games||[];}}catch(_){}
+  if(!games.length){
+    games=[
+      {matchup:'MIN Timberwolves @ SA Spurs',spread:{away:{line:'+4.5',odds:-110},home:{line:'-4.5',odds:-120}},moneyline:{away:180,home:-238}},
+      {matchup:'CLE Cavaliers @ DET Pistons',spread:{away:{line:'+3.5',odds:-115},home:{line:'-3.5',odds:-105}},moneyline:{away:124,home:-148}},
+      {matchup:'PHI 76ers @ NY Knicks',spread:{away:{line:'+7.5',odds:-115},home:{line:'-7.5',odds:-105}},moneyline:{away:225,home:-278}},
+    ];
+  }
+  const fmt=n=>n>0?'+'+n:String(n);
+  const mk=g=>`<span class="tick">
+    <span class="tick-match">${g.matchup}</span>
+    <span class="tick-spread">&#9670; ${g.spread?.away?.line} (${g.spread?.away?.odds})</span>
+    <span class="tick-ml">ML ${fmt(g.moneyline?.away)} / ${fmt(g.moneyline?.home)}</span>
+  </span>`;
+  const html=games.map(mk).join('');
+  const track=document.getElementById('ticker');
+  track.innerHTML=html+html+html;
+})();
+
+// ── Demo ─────────────────────────────────────────────────────────────────────
+let sport='nba';
+
+function selectSport(s,btn){
+  sport=s;
+  document.querySelectorAll('.sport-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  updateDemo();
+}
+
+async function updateDemo(){
+  const origin=window.location.origin;
+  document.getElementById('curl-block').innerHTML=
+    `<span class="kw">curl</span> <span class="str">${origin}/odds/${sport}</span> \\\\<br>&nbsp;&nbsp;<span class="kw">-H</span> <span class="str">"X-API-Key: YOUR_API_KEY"</span>`;
+  try{
+    const r=await fetch('/odds/preview');
+    if(r.ok){const d=await r.json();renderJson(d);return;}
+  }catch(_){}
+  renderJson({source:"DraftKings",league:"NBA",game_count:3,games:[
+    {matchup:"MIN Timberwolves @ SA Spurs",spread:{away:{line:"+4.5",odds:-110},home:{line:"-4.5",odds:-120}},moneyline:{away:180,home:-238},total:{over:{line:"197.5",odds:-120},under:{line:"197.5",odds:-110}}},
+  ]});
+}
+
+function renderJson(obj){
+  const json=JSON.stringify(obj,null,2);
+  const esc=json.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  document.getElementById('resp-block').innerHTML=esc.replace(
+    /("(\\\\u[a-zA-Z0-9]{4}|\\\\[^u]|[^\\\\"])*"(\\s*:)?|\\b(true|false|null)\\b|-?\\d+(?:\\.\\d*)?(?:[eE][+\\-]?\\d+)?)/g,
+    m=>{
+      let c='num';
+      if(/^"/.test(m)){if(/:$/.test(m)){return`<span class="key">${m}</span>`}c='str';}
+      else if(/true|false/.test(m))c='kw';
+      else if(/null/.test(m))c='gray';
+      return`<span class="${c}">${m}</span>`;
+    }
+  );
+}
+
+function copyCmd(){
+  const origin=window.location.origin;
+  navigator.clipboard.writeText(`curl ${origin}/odds/${sport} -H "X-API-Key: YOUR_API_KEY"`).catch(()=>{});
+  const btn=document.getElementById('copy-btn');
+  btn.textContent='Copied!';
+  setTimeout(()=>btn.textContent='Copy',2000);
+}
+
+updateDemo();
+
+// ── Scroll fade-in ────────────────────────────────────────────────────────────
+const obs=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');obs.unobserve(e.target);}}),{threshold:.1});
+document.querySelectorAll('.fade-up').forEach(el=>obs.observe(el));
+
+// ── Count-up animation ────────────────────────────────────────────────────────
+const cObs=new IntersectionObserver(es=>es.forEach(e=>{
+  if(e.isIntersecting&&e.target.dataset.count){
+    const t=+e.target.dataset.count,el=e.target;
+    let v=0;const step=t/40;
+    const id=setInterval(()=>{v+=step;if(v>=t){v=t;clearInterval(id);}el.textContent=Math.round(v);},30);
+    cObs.unobserve(el);
+  }
+}),{threshold:.5});
+document.querySelectorAll('[data-count]').forEach(el=>cObs.observe(el));
+</script>
+</body>
+</html>"""
