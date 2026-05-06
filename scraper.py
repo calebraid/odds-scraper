@@ -6,7 +6,6 @@ import re
 import sys
 from datetime import datetime, timezone
 
-import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 NBA_BASE = "https://sportsbook.draftkings.com/leagues/basketball/nba"
@@ -15,18 +14,6 @@ NBA_PLAYER_PROPS = f"{NBA_BASE}?category=games&subcategory=player-props"
 OUTPUT_DIR = "odds"
 INTERVAL_SECONDS = 60
 DEBUG = "--debug" in sys.argv
-
-PRIZEPICKS_URL = (
-    "https://api.prizepicks.com/projections"
-    "?league_id=7&per_page=250&single_stat=true"
-)
-PRIZEPICKS_OUTPUT = os.path.join(OUTPUT_DIR, "prizepicks_latest.json")
-
-# Normalize PrizePicks stat names to match DraftKings conventions
-_PP_STAT_NAMES: dict[str, str] = {
-    "3-Pointers Made": "Threes",
-    "Blocked Shots": "Blocks",
-}
 
 
 def parse_american_odds(text: str | None) -> int | None:
@@ -447,84 +434,6 @@ async def scrape_player_props(page) -> list[dict]:
     return _parse_dk_api_props(captured)
 
 
-# ── PrizePicks ────────────────────────────────────────────────────────────────
-
-async def scrape_prizepicks() -> list[dict]:
-    """Fetch NBA player props from PrizePicks using HTTP/2 with Cloudflare-bypass headers.
-
-    Response is JSON:API format:
-      data[]     — projections with stat_type, line_score, relationships
-      included[] — new_player records with name, team, league
-    """
-    print("  [prizepicks] fetching API")
-    async with httpx.AsyncClient(http2=True) as client:
-        resp = await client.get(
-            "https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true&game_mode=pickem",
-            headers={
-                "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
-                "sec-ch-ua-mobile": "?0",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Referer": "https://app.prizepicks.com/",
-                "X-Device-ID": "1a9d6304-65f3-4304-8523-ccf458d3c0c4",
-                "sec-ch-ua-platform": '"macOS"',
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-    # Index players by ID from the included array
-    players: dict[str, dict] = {}
-    for item in (data.get("included") or []):
-        if item.get("type") == "new_player":
-            players[item["id"]] = item.get("attributes", {})
-
-    props: list[dict] = []
-    for proj in (data.get("data") or []):
-        if proj.get("type") != "projection":
-            continue
-        attrs = proj.get("attributes", {})
-
-        player_id = (
-            (proj.get("relationships") or {})
-            .get("new_player", {})
-            .get("data", {})
-            .get("id")
-        )
-        player = players.get(player_id, {})
-
-        if player.get("league") != "NBA":
-            continue
-
-        raw_stat = attrs.get("stat_type") or ""
-        stat_type = _PP_STAT_NAMES.get(raw_stat, raw_stat)
-
-        props.append({
-            "player": player.get("name"),
-            "team": player.get("team"),
-            "stat_type": stat_type,
-            "line": attrs.get("line_score"),
-            "start_time": attrs.get("start_time"),
-        })
-
-    return props
-
-
-def save_prizepicks(props: list[dict], timestamp: str) -> str:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    payload = {
-        "source": "PrizePicks",
-        "league": "NBA",
-        "scraped_at": timestamp,
-        "count": len(props),
-        "props": props,
-    }
-    with open(PRIZEPICKS_OUTPUT, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    return PRIZEPICKS_OUTPUT
-
-
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def _save_debug_html(html: str, filename: str) -> None:
@@ -629,17 +538,6 @@ async def main():
 
             except Exception as exc:
                 print(f"  ERROR: {exc}")
-
-            print("  [prizepicks] starting")
-            try:
-                pp_props = await asyncio.wait_for(scrape_prizepicks(), timeout=20)
-                pp_out = save_prizepicks(pp_props, ts)
-                print(f"  prizepicks: {len(pp_props)} prop(s) -> {pp_out}")
-            except asyncio.TimeoutError:
-                print("  ERROR (prizepicks): timed out after 20s")
-            except Exception as exc:
-                print(f"  ERROR (prizepicks): {type(exc).__name__}: {exc}")
-            print("  [prizepicks] done")
 
             print(f"  sleeping {INTERVAL_SECONDS}s ...")
             await asyncio.sleep(INTERVAL_SECONDS)
