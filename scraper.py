@@ -467,26 +467,23 @@ async def scrape_prizepicks(page) -> list[dict]:
         print(f"  [prizepicks] page load warning: {exc}")
 
     print("  [prizepicks] fetching API")
-    data = await page.evaluate(
-        """async () => {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 15000);
-            try {
-                const resp = await fetch(
-                    'https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true',
-                    {
-                        signal: controller.signal,
-                        headers: { 'Accept': 'application/json', 'Referer': 'https://app.prizepicks.com/' }
-                    }
-                );
-                if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                return resp.json();
-            } finally {
-                clearTimeout(timer);
-            }
-        }""",
-        timeout=18_000,
-    )
+    data = await page.evaluate("""async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        try {
+            const resp = await fetch(
+                'https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true',
+                {
+                    signal: controller.signal,
+                    headers: { 'Accept': 'application/json', 'Referer': 'https://app.prizepicks.com/' }
+                }
+            );
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.json();
+        } finally {
+            clearTimeout(timer);
+        }
+    }""")
 
     # Index players by ID from the included array
     players: dict[str, dict] = {}
