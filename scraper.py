@@ -6,6 +6,7 @@ import re
 import sys
 from datetime import datetime, timezone
 
+import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 NBA_BASE = "https://sportsbook.draftkings.com/leagues/basketball/nba"
@@ -14,6 +15,18 @@ NBA_PLAYER_PROPS = f"{NBA_BASE}?category=games&subcategory=player-props"
 OUTPUT_DIR = "odds"
 INTERVAL_SECONDS = 60
 DEBUG = "--debug" in sys.argv
+
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
+PLAYER_PROPS_OUTPUT = os.path.join(OUTPUT_DIR, "player_props_latest.json")
+
+_MARKET_NAMES = {
+    "player_points": "Points",
+    "player_rebounds": "Rebounds",
+    "player_assists": "Assists",
+    "player_threes": "Threes",
+    "player_steals": "Steals",
+    "player_blocks": "Blocks",
+}
 
 
 def parse_american_odds(text: str | None) -> int | None:
@@ -466,6 +479,92 @@ def save(games: list[dict], player_props: list[dict], timestamp: str) -> str:
     return latest
 
 
+# ── The Odds API player props ─────────────────────────────────────────────────
+
+async def scrape_odds_api_props() -> list[dict]:
+    """Fetch NBA player props from The Odds API (api.the-odds-api.com).
+
+    Requires ODDS_API_KEY env var. Free tier: 500 requests/month.
+    Response: array of games, each with bookmakers -> markets -> outcomes.
+    Outcomes are deduplicated across bookmakers (first seen wins).
+    """
+    if not ODDS_API_KEY:
+        raise RuntimeError("ODDS_API_KEY environment variable not set")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            "https://api.the-odds-api.com/v4/sports/basketball_nba/players/odds",
+            params={
+                "apiKey": ODDS_API_KEY,
+                "regions": "us",
+                "markets": "player_points,player_rebounds,player_assists,player_threes,player_steals,player_blocks",
+                "oddsFormat": "american",
+            },
+        )
+        resp.raise_for_status()
+        games = resp.json()
+
+    remaining = resp.headers.get("x-requests-remaining", "?")
+    used = resp.headers.get("x-requests-used", "?")
+    print(f"  [odds-api] requests used={used} remaining={remaining}")
+
+    seen: set[tuple] = set()
+    props: list[dict] = []
+
+    for game in (games if isinstance(games, list) else []):
+        home = game.get("home_team", "")
+        away = game.get("away_team", "")
+        matchup = f"{away} @ {home}"
+
+        for bookmaker in (game.get("bookmakers") or []):
+            for market in (bookmaker.get("markets") or []):
+                stat_type = _MARKET_NAMES.get(market.get("key", ""))
+                if not stat_type:
+                    continue
+
+                # Collect Over/Under pairs per player from this market
+                by_player: dict[str, dict] = {}
+                for outcome in (market.get("outcomes") or []):
+                    player = (outcome.get("description") or "").strip()
+                    side = (outcome.get("name") or "").lower()
+                    price = outcome.get("price")
+                    point = outcome.get("point")
+                    if not player:
+                        continue
+                    entry = by_player.setdefault(player, {
+                        "player": player,
+                        "matchup": matchup,
+                        "stat_type": stat_type,
+                        "line": point,
+                    })
+                    if side == "over":
+                        entry["over_odds"] = price
+                    elif side == "under":
+                        entry["under_odds"] = price
+
+                for player, entry in by_player.items():
+                    key = (player, stat_type, matchup)
+                    if key not in seen:
+                        seen.add(key)
+                        props.append(entry)
+
+    return props
+
+
+def save_player_props(props: list[dict], timestamp: str) -> str:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    payload = {
+        "source": "The Odds API",
+        "league": "NBA",
+        "scraped_at": timestamp,
+        "count": len(props),
+        "props": props,
+    }
+    with open(PLAYER_PROPS_OUTPUT, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return PLAYER_PROPS_OUTPUT
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 async def main():
@@ -538,6 +637,13 @@ async def main():
 
             except Exception as exc:
                 print(f"  ERROR: {exc}")
+
+            try:
+                pp = await scrape_odds_api_props()
+                pp_out = save_player_props(pp, ts)
+                print(f"  odds-api props: {len(pp)} prop(s) -> {pp_out}")
+            except Exception as exc:
+                print(f"  ERROR (odds-api): {exc}")
 
             print(f"  sleeping {INTERVAL_SECONDS}s ...")
             await asyncio.sleep(INTERVAL_SECONDS)

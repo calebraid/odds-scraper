@@ -153,6 +153,23 @@ def get_preview_odds():
         return JSONResponse(content={"games": []})
 
 
+@app.get("/odds/nba/props", summary="NBA player props from The Odds API")
+def get_nba_props(auth: Annotated[dict, Depends(authenticate)], response: Response):
+    _set_rate_limit_headers(response, auth)
+    data = load_odds("player_props_latest.json")
+    warning = staleness_warning(data.get("scraped_at"))
+    result = {
+        "source": data.get("source"),
+        "league": data.get("league"),
+        "scraped_at": data.get("scraped_at"),
+        "count": data.get("count", len(data.get("props", []))),
+        "props": data.get("props", []),
+    }
+    if warning:
+        result["warning"] = warning
+    return JSONResponse(content=result, headers=dict(response.headers))
+
+
 @app.get("/odds/{sport}/props", summary="Player props for a specific sport")
 def get_sport_props(sport: str, auth: Annotated[dict, Depends(authenticate)], response: Response):
     _set_rate_limit_headers(response, auth)
