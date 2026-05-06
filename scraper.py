@@ -467,23 +467,26 @@ async def scrape_prizepicks(page) -> list[dict]:
         print(f"  [prizepicks] page load warning: {exc}")
 
     print("  [prizepicks] fetching API")
-    data = await page.evaluate("""async () => {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 15000);
-        try {
-            const resp = await fetch(
-                'https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true',
-                {
-                    signal: controller.signal,
-                    headers: { 'Accept': 'application/json', 'Referer': 'https://app.prizepicks.com/' }
-                }
-            );
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-            return resp.json();
-        } finally {
-            clearTimeout(timer);
-        }
-    }""")
+    data = await page.evaluate(
+        """async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 15000);
+            try {
+                const resp = await fetch(
+                    'https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true',
+                    {
+                        signal: controller.signal,
+                        headers: { 'Accept': 'application/json', 'Referer': 'https://app.prizepicks.com/' }
+                    }
+                );
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return resp.json();
+            } finally {
+                clearTimeout(timer);
+            }
+        }""",
+        timeout=18_000,
+    )
 
     # Index players by ID from the included array
     players: dict[str, dict] = {}
@@ -643,11 +646,13 @@ async def main():
 
             print("  [prizepicks] starting")
             try:
-                pp_props = await scrape_prizepicks(page)
+                pp_props = await asyncio.wait_for(scrape_prizepicks(page), timeout=20)
                 pp_out = save_prizepicks(pp_props, ts)
                 print(f"  prizepicks: {len(pp_props)} prop(s) -> {pp_out}")
+            except asyncio.TimeoutError:
+                print("  ERROR (prizepicks): timed out after 20s")
             except Exception as exc:
-                print(f"  ERROR (prizepicks): {exc}")
+                print(f"  ERROR (prizepicks): {type(exc).__name__}: {exc}")
             print("  [prizepicks] done")
 
             print(f"  sleeping {INTERVAL_SECONDS}s ...")
