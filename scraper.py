@@ -145,23 +145,31 @@ async def scrape_game_lines(page) -> list[dict]:
 # ── Player Props (API interception) ──────────────────────────────────────────
 
 # Subdomains DraftKings uses for its internal odds/event API.
-# We only parse JSON from these — skipping analytics, ads, etc.
 _DK_API_DOMAINS = ("sportsbook-nash.draftkings.com", "api.draftkings.com")
+
+# Known NBA player-prop subcategory IDs on DraftKings.
+# The initial page load captures Points (16477); the rest are fetched directly.
+_PROP_SUBCATEGORY_IDS = [
+    "16477",  # Points
+    "16478",  # Rebounds
+    "16479",  # Assists
+    "16480",  # Threes
+    "16481",  # Steals
+    "16482",  # Blocks
+]
 
 
 async def _intercept_props_api(page) -> list[tuple[str, any]]:
-    """Navigate to the player-props page, then navigate directly to each
-    subcategory URL found in the DOM to collect API responses for all prop
-    types (Points, Rebounds, Assists, Threes, …).
+    """Load the player-props page (establishes browser session/cookies) and
+    capture the initial API URL as a template.  Then use page.evaluate(fetch())
+    to call the same API endpoint for every other known subcategoryId, reusing
+    the live browser session so cookies and auth headers are sent automatically.
 
-    DK fires one API call per subcategory tab (keyed by subcategoryId).
-    The initial page load only fires the default tab.  We find the other
-    subcategory URLs from <a href> elements in the DOM after the first load,
-    then navigate to each — avoiding stale DOM handle crashes that occur
-    when clicking tab elements that get destroyed by navigation.
+    Returns (url, parsed_body) pairs, largest first.
     """
     captured: list[tuple[str, any]] = []
     seen_urls: set[str] = set()
+    template_url: list[str] = []  # filled by on_response; list used as mutable cell
 
     async def on_response(response):
         if response.status != 200:
@@ -179,76 +187,63 @@ async def _intercept_props_api(page) -> list[tuple[str, any]]:
             return
         if len(json.dumps(body)) < 500:
             return
+        # Grab the markets endpoint URL as a template for subsequent fetches
+        if "leagueSubcategory" in url and not template_url:
+            template_url.append(url)
         seen_urls.add(url)
         captured.append((url, body))
 
     page.on("response", on_response)
 
-    # ── Initial load — captures the default subcategory (Points) ──────────
+    # ── Initial page load — captures the default subcategory (Points) ─────
     try:
         await page.goto(NBA_PLAYER_PROPS, wait_until="domcontentloaded", timeout=30_000)
         await page.wait_for_selector(".cms-market-selector-static__event-wrapper", timeout=15_000)
     except PlaywrightTimeoutError:
         pass
     await asyncio.sleep(3)
+    page.remove_listener("response", on_response)
 
-    if captured:
-        print(f"  [props] initial API URL: {captured[0][0]}")
+    if not template_url:
+        print("  [props] no API template URL captured; using initial responses only")
+        captured.sort(key=lambda t: len(json.dumps(t[1])), reverse=True)
+        return captured
 
-    # ── Find all subcategory URLs via DOM evaluation ───────────────────────
-    # DK renders subcategory tabs as <a> elements whose href contains
-    # subcategoryId.  We read URLs as strings here so there are no stale
-    # DOM handles to worry about when we navigate later.
-    found: list[dict] = await page.evaluate("""
-        () => {
-            const seen = new Set();
-            const results = [];
-            document.querySelectorAll('a').forEach(el => {
-                const href = el.href || '';
-                if (href.includes('subcategoryId') && !seen.has(href)) {
-                    seen.add(href);
-                    results.push({text: (el.textContent || '').trim(), href});
-                }
-            });
-            // Fallback: elements with a data-subcategory-id attribute
-            document.querySelectorAll('[data-subcategory-id]').forEach(el => {
-                const id = el.dataset.subcategoryId;
-                if (id && !seen.has(id)) {
-                    seen.add(id);
-                    results.push({text: (el.textContent || '').trim(), subcategoryId: id});
-                }
-            });
-            return results;
-        }
-    """)
+    base_url = template_url[0]
+    print(f"  [props] template URL: {base_url[:120]}...")
 
-    print(f"  [props] subcategory links found in DOM: {len(found)}")
-    for item in found[:10]:
-        print(f"    {item!r}")
+    # Extract the subcategoryId already loaded so we can skip it below
+    m = re.search(r"subcategoryId[^']*'(\d+)'", base_url)
+    original_id = m.group(1) if m else "16477"
+    print(f"  [props] original subcategoryId in template: {original_id}")
 
-    # ── Navigate to each subcategory URL ──────────────────────────────────
-    current_url = page.url
-    nav_count = 0
-    for item in found:
-        href = item.get("href", "")
-        sub_id = item.get("subcategoryId", "")
-        label = (item.get("text") or "?")[:40]
-
-        target = href or f"{NBA_PLAYER_PROPS}&subcategoryId={sub_id}"
-        if not target or target == current_url:
+    # ── Fetch remaining subcategories via browser fetch() ─────────────────
+    # fetch() runs inside the live browser session, so it inherits the same
+    # cookies and headers that DK's own JS uses — no bot detection triggered.
+    for sub_id in _PROP_SUBCATEGORY_IDS:
+        if sub_id == original_id:
+            print(f"  [props] subcategoryId={sub_id} already captured")
             continue
 
-        print(f"  [props] loading subcategory {label!r}")
+        fetch_url = base_url.replace(f"'{original_id}'", f"'{sub_id}'")
+        print(f"  [props] fetching subcategoryId={sub_id}")
         try:
-            await page.goto(target, wait_until="domcontentloaded", timeout=20_000)
-            await asyncio.sleep(2)
-            current_url = page.url
-            nav_count += 1
+            result = await page.evaluate(
+                """async (url) => {
+                    const resp = await fetch(url);
+                    if (!resp.ok) return null;
+                    return resp.json();
+                }""",
+                fetch_url,
+            )
+            if result and isinstance(result, dict) and len(json.dumps(result)) >= 500:
+                captured.append((fetch_url, result))
+                mkt_count = len(result.get("markets") or [])
+                print(f"  [props] subcategoryId={sub_id}: {mkt_count} markets")
+            else:
+                print(f"  [props] subcategoryId={sub_id}: empty/null response")
         except Exception as exc:
-            print(f"  [props] failed {label!r}: {exc}")
-
-    print(f"  [props] navigated to {nav_count} subcategory page(s)")
-    page.remove_listener("response", on_response)
+            print(f"  [props] subcategoryId={sub_id} fetch failed: {exc}")
 
     captured.sort(key=lambda t: len(json.dumps(t[1])), reverse=True)
     return captured
