@@ -241,6 +241,14 @@ def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
         f"{len(all_markets)} markets, {len(all_selections)} selections"
     )
 
+    # Debug: unique marketType names and sample market->prop_type mapping
+    seen_mt: list[str] = []
+    for m in all_markets.values():
+        mt = (m.get("marketType") or {}).get("name") or ""
+        if mt and mt not in seen_mt:
+            seen_mt.append(mt)
+    print(f"  [props] marketType names ({len(seen_mt)} unique): {seen_mt[:10]}")
+
     def coerce_odds(val) -> int | None:
         return None if val is None else parse_american_odds(str(val))
 
@@ -271,6 +279,7 @@ def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
 
     # ── Process each event ────────────────────────────────────────────────
     results: list[dict] = []
+    _debug_market_count = 0
 
     for eid, event in all_events.items():
         name = (event.get("name") or "").strip()
@@ -281,9 +290,14 @@ def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
 
         for market in markets_by_event.get(eid, []):
             mid       = str(market.get("id") or "")
-            prop_type = simplify_prop_type(
-                (market.get("marketType") or {}).get("name") or ""
-            )
+            raw_mt    = (market.get("marketType") or {}).get("name") or ""
+            prop_type = simplify_prop_type(raw_mt)
+            if _debug_market_count < 3:
+                print(
+                    f"  [props] market sample: name={market.get('name')!r} "
+                    f"marketType={raw_mt!r} -> prop_type={prop_type!r}"
+                )
+                _debug_market_count += 1
             if not prop_type:
                 continue
 
