@@ -354,20 +354,22 @@ async def scrape_player_props(page) -> list[dict]:
     captured = await _intercept_props_api(page)
 
     print(f"  [props] intercepted {len(captured)} API response(s)")
-    for url, body in captured:
-        if not isinstance(body, dict):
-            continue
-        n_events  = len(body.get("events") or [])
-        n_markets = len(body.get("markets") or [])
-        n_sels    = len(body.get("selections") or [])
-        print(f"    {url}")
-        print(f"      keys={list(body.keys())}  "
-              f"events={n_events}  markets={n_markets}  selections={n_sels}")
-        # Log first market and selection to confirm field names
-        if n_markets:
-            print(f"      market[0]={json.dumps(body['markets'][0])[:200]}")
-        if n_sels:
-            print(f"      selection[0]={json.dumps(body['selections'][0])[:200]}")
+
+    # Diagnostic: log structure of largest response BEFORE parsing so this
+    # always appears in Railway logs regardless of parser early-exits.
+    if captured:
+        url, body = captured[0]
+        print(f"  [props] largest response: {url}")
+        if isinstance(body, dict):
+            print(f"    top-level keys: {list(body.keys())}")
+            markets    = body.get("markets") or []
+            selections = body.get("selections") or []
+            events     = body.get("events") or []
+            print(f"    events={len(events)}  markets={len(markets)}  selections={len(selections)}")
+            if markets:
+                print(f"    market[0] full: {json.dumps(markets[0])}")
+            if selections:
+                print(f"    selection[0] full: {json.dumps(selections[0])}")
 
     results = _parse_dk_api_props(captured)
 
