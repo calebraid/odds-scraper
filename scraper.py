@@ -6,6 +6,7 @@ import re
 import sys
 from datetime import datetime, timezone
 
+import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 NBA_BASE = "https://sportsbook.draftkings.com/leagues/basketball/nba"
@@ -448,26 +449,30 @@ async def scrape_player_props(page) -> list[dict]:
 
 # ── PrizePicks ────────────────────────────────────────────────────────────────
 
-async def scrape_prizepicks(page) -> list[dict]:
-    """Fetch NBA player props from PrizePicks via an in-browser fetch() call.
-
-    Direct httpx requests get 403ed. Navigating to app.prizepicks.com first
-    gives the browser the right origin cookies/headers, then fetch() from
-    page.evaluate() inherits that session and bypasses the block.
+async def scrape_prizepicks() -> list[dict]:
+    """Fetch NBA player props from PrizePicks using HTTP/2 with Cloudflare-bypass headers.
 
     Response is JSON:API format:
       data[]     — projections with stat_type, line_score, relationships
       included[] — new_player records with name, team, league
     """
-    print("  [prizepicks] navigating to API URL")
-    await page.goto(
-        "https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true",
-        wait_until="domcontentloaded",
-        timeout=15_000,
-    )
-    print("  [prizepicks] reading response body")
-    content = await page.inner_text("body")
-    data = json.loads(content)
+    print("  [prizepicks] fetching API")
+    async with httpx.AsyncClient(http2=True) as client:
+        resp = await client.get(
+            "https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true&game_mode=pickem",
+            headers={
+                "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+                "sec-ch-ua-mobile": "?0",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Referer": "https://app.prizepicks.com/",
+                "X-Device-ID": "1a9d6304-65f3-4304-8523-ccf458d3c0c4",
+                "sec-ch-ua-platform": '"macOS"',
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
     # Index players by ID from the included array
     players: dict[str, dict] = {}
@@ -627,7 +632,7 @@ async def main():
 
             print("  [prizepicks] starting")
             try:
-                pp_props = await asyncio.wait_for(scrape_prizepicks(page), timeout=20)
+                pp_props = await asyncio.wait_for(scrape_prizepicks(), timeout=20)
                 pp_out = save_prizepicks(pp_props, ts)
                 print(f"  prizepicks: {len(pp_props)} prop(s) -> {pp_out}")
             except asyncio.TimeoutError:
