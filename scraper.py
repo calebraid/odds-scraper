@@ -150,15 +150,15 @@ _DK_API_DOMAINS = ("sportsbook-nash.draftkings.com", "api.draftkings.com")
 
 
 async def _intercept_props_api(page) -> list[tuple[str, any]]:
-    """Navigate to the player-props page, then click through every subcategory
-    tab (Points, Rebounds, Assists, Threes, …) to trigger a separate API call
-    per tab.  All responses are collected into one list.
+    """Navigate to the player-props page, then navigate directly to each
+    subcategory URL found in the DOM to collect API responses for all prop
+    types (Points, Rebounds, Assists, Threes, …).
 
-    DK hardcodes a subcategoryId per tab, so the initial page load only fires
-    the API for the default tab (Points Milestones).  Clicking each tab fires
-    a fresh request for that category's markets/selections.
-
-    Returns a list of (url, parsed_body) pairs, largest bodies first.
+    DK fires one API call per subcategory tab (keyed by subcategoryId).
+    The initial page load only fires the default tab.  We find the other
+    subcategory URLs from <a href> elements in the DOM after the first load,
+    then navigate to each — avoiding stale DOM handle crashes that occur
+    when clicking tab elements that get destroyed by navigation.
     """
     captured: list[tuple[str, any]] = []
     seen_urls: set[str] = set()
@@ -184,7 +184,7 @@ async def _intercept_props_api(page) -> list[tuple[str, any]]:
 
     page.on("response", on_response)
 
-    # ── Initial page load (fires default tab — usually Points) ────────────
+    # ── Initial load — captures the default subcategory (Points) ──────────
     try:
         await page.goto(NBA_PLAYER_PROPS, wait_until="domcontentloaded", timeout=30_000)
         await page.wait_for_selector(".cms-market-selector-static__event-wrapper", timeout=15_000)
@@ -192,46 +192,62 @@ async def _intercept_props_api(page) -> list[tuple[str, any]]:
         pass
     await asyncio.sleep(3)
 
-    # ── Click through every subcategory tab ───────────────────────────────
-    # DK renders tabs as <li> or <button> elements inside a tab-switcher.
-    # Try both selector families; collect unique tab handles.
-    tab_sels = [
-        "li.sportsbook-tabbed-subheader__tab",
-        "button.sportsbook-tabbed-subheader__tab",
-        "[data-testid='subcategory-tab']",
-        "li[class*='tab-item']",
-        "button[class*='subcategory']",
-    ]
-    tabs = []
-    for sel in tab_sels:
-        tabs = await page.query_selector_all(sel)
-        if tabs:
-            print(f"  [props] found {len(tabs)} subcategory tab(s) via {sel!r}")
-            break
+    if captured:
+        print(f"  [props] initial API URL: {captured[0][0]}")
 
-    if not tabs:
-        # Fallback: grab any clickable tab-like elements inside a nav/header
-        tabs = await page.query_selector_all("nav li, nav button, [role='tab']")
-        print(f"  [props] fallback tab selector: {len(tabs)} candidates")
+    # ── Find all subcategory URLs via DOM evaluation ───────────────────────
+    # DK renders subcategory tabs as <a> elements whose href contains
+    # subcategoryId.  We read URLs as strings here so there are no stale
+    # DOM handles to worry about when we navigate later.
+    found: list[dict] = await page.evaluate("""
+        () => {
+            const seen = new Set();
+            const results = [];
+            document.querySelectorAll('a').forEach(el => {
+                const href = el.href || '';
+                if (href.includes('subcategoryId') && !seen.has(href)) {
+                    seen.add(href);
+                    results.push({text: (el.textContent || '').trim(), href});
+                }
+            });
+            // Fallback: elements with a data-subcategory-id attribute
+            document.querySelectorAll('[data-subcategory-id]').forEach(el => {
+                const id = el.dataset.subcategoryId;
+                if (id && !seen.has(id)) {
+                    seen.add(id);
+                    results.push({text: (el.textContent || '').trim(), subcategoryId: id});
+                }
+            });
+            return results;
+        }
+    """)
 
-    before_click = len(captured)
-    for i, tab in enumerate(tabs):
+    print(f"  [props] subcategory links found in DOM: {len(found)}")
+    for item in found[:10]:
+        print(f"    {item!r}")
+
+    # ── Navigate to each subcategory URL ──────────────────────────────────
+    current_url = page.url
+    nav_count = 0
+    for item in found:
+        href = item.get("href", "")
+        sub_id = item.get("subcategoryId", "")
+        label = (item.get("text") or "?")[:40]
+
+        target = href or f"{NBA_PLAYER_PROPS}&subcategoryId={sub_id}"
+        if not target or target == current_url:
+            continue
+
+        print(f"  [props] loading subcategory {label!r}")
         try:
-            label = (await tab.inner_text()).strip()
-            # Skip the first tab — already loaded on initial navigation
-            if i == 0:
-                print(f"  [props] tab 0 ({label!r}) already loaded, skipping click")
-                continue
-            print(f"  [props] clicking tab {i} ({label!r})")
-            await tab.click()
-            # Wait briefly for the API response to arrive
+            await page.goto(target, wait_until="domcontentloaded", timeout=20_000)
             await asyncio.sleep(2)
+            current_url = page.url
+            nav_count += 1
         except Exception as exc:
-            print(f"  [props] tab {i} click failed: {exc}")
+            print(f"  [props] failed {label!r}: {exc}")
 
-    new_responses = len(captured) - before_click
-    print(f"  [props] tab clicks triggered {new_responses} new API response(s)")
-
+    print(f"  [props] navigated to {nav_count} subcategory page(s)")
     page.remove_listener("response", on_response)
 
     captured.sort(key=lambda t: len(json.dumps(t[1])), reverse=True)
