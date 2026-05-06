@@ -201,35 +201,35 @@ async def _intercept_props_api(page) -> list[tuple[str, any]]:
 def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
     """Parse player props from DraftKings' normalized flat API response.
 
-    Actual shape (confirmed from live interception):
-      {
-        "sports": [...],
-        "leagues": [...],
-        "events":     [{ "id": "34074632", "name": "LA Lakers @ OKC Thunder", ... }],
-        "markets":    [{ "id": "...", "eventId": "34074632", "name": "...", ... }],
-        "selections": [{ "id": "...", "marketId": "...", "points": 25.5, ... }],
-        "subscriptionPartials": [...]
-      }
+    Confirmed field paths (from live interception):
+      events[]     : {id, name}
+      markets[]    : {id, eventId, name, marketType: {name}}
+      selections[] : {id, marketId, label, displayOdds: {american},
+                      participants: [{name, type}], milestoneValue}
 
-    Join path: events[id] <- markets[eventId] <- selections[marketId]
+    Join: events[id] <- markets[eventId] <- selections[marketId]
 
-    Player name is embedded in markets[].name (common formats:
-      "Anthony Edwards - Points"  or  "Anthony Edwards Points O/U").
-    Prop type (e.g. "Points") comes from markets[].groupName when present,
-    otherwise inferred by stripping the player name from markets[].name.
+    Two selection styles exist:
+      • Standard O/U  — label is "Over" or "Under"; one market holds both
+      • Milestone      — label is "5+", "10+", etc.; each threshold is its
+                         own selection with milestoneValue as the line
     """
     results: list[dict] = []
     seen: set[str] = set()
 
-    def _first(obj: dict, *keys):
-        for k in keys:
-            v = obj.get(k)
-            if v is not None:
-                return v
-        return None
-
     def coerce_odds(val) -> int | None:
         return None if val is None else parse_american_odds(str(val))
+
+    def player_from_participants(participants) -> str:
+        for p in (participants or []):
+            if isinstance(p, dict) and p.get("type") == "Player":
+                return (p.get("name") or "").strip()
+        return ""
+
+    def simplify_prop_type(raw: str) -> str:
+        for suffix in (" Milestones", " O/U", " Over/Under", " Odds", " Props"):
+            raw = raw.replace(suffix, "")
+        return raw.strip()
 
     for url, body in captured:
         if not isinstance(body, dict):
@@ -247,7 +247,7 @@ def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
         for sel in raw_selections:
             if not isinstance(sel, dict):
                 continue
-            mid = str(_first(sel, "marketId", "market_id") or "")
+            mid = str(sel.get("marketId") or "")
             if mid:
                 sels_by_market.setdefault(mid, []).append(sel)
 
@@ -256,7 +256,7 @@ def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
         for m in raw_markets:
             if not isinstance(m, dict):
                 continue
-            eid = str(_first(m, "eventId", "event_id") or "")
+            eid = str(m.get("eventId") or "")
             if eid:
                 markets_by_event.setdefault(eid, []).append(m)
 
@@ -264,83 +264,97 @@ def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
         for event in raw_events:
             if not isinstance(event, dict):
                 continue
-            eid  = str(_first(event, "id", "eventId") or "")
-            name = (_first(event, "name", "eventName") or "").strip()
+            eid  = str(event.get("id") or "")
+            name = (event.get("name") or "").strip()
             if not name or name in seen:
                 continue
 
-            event_markets = markets_by_event.get(eid, [])
-            if not event_markets:
-                continue
+            prop_groups: dict[str, list[dict]] = {}
 
-            # prop_type -> player_name -> entry
-            prop_groups: dict[str, dict[str, dict]] = {}
-
-            for market in event_markets:
-                mid         = str(_first(market, "id", "marketId") or "")
-                market_name = (_first(market, "name", "marketName") or "").strip()
-                # groupName / subcategoryName gives the prop type directly
-                group_name  = (
-                    _first(market, "groupName", "subcategoryName",
-                           "betOfferTypeName", "typeName") or ""
-                ).strip()
-
-                # ── Extract player name and prop type from market name ────
-                # Formats seen: "Anthony Edwards - Points"
-                #               "Anthony Edwards Points O/U"
-                player_name = (_first(market, "participant", "playerName") or "").strip()
-                prop_type   = group_name or ""
-
-                if not player_name and " - " in market_name:
-                    left, right = [p.strip() for p in market_name.split(" - ", 1)]
-                    # Shorter right side → it's the prop type; left is the player
-                    if len(right.split()) <= 4:
-                        player_name = left
-                        if not prop_type:
-                            prop_type = right.replace(" O/U", "").replace(" Over/Under", "")
-                    else:
-                        player_name = right
-                        if not prop_type:
-                            prop_type = left.replace(" O/U", "").replace(" Over/Under", "")
-                elif not player_name and group_name and market_name:
-                    # market name IS the player name when group_name is set separately
-                    player_name = market_name.replace(" O/U", "").replace(" Over/Under", "").strip()
-
-                if not player_name or not prop_type:
+            for market in markets_by_event.get(eid, []):
+                mid       = str(market.get("id") or "")
+                prop_type = simplify_prop_type(
+                    (market.get("marketType") or {}).get("name") or ""
+                )
+                if not prop_type:
                     continue
 
-                # ── Join selections ───────────────────────────────────────
                 selections = sels_by_market.get(mid, [])
                 if not selections:
                     continue
 
-                entry: dict = {"player": player_name}
+                # Player name from selections' participants (most reliable)
+                player = ""
                 for sel in selections:
-                    label = (_first(sel, "name", "label", "type") or "").lower()
-                    odds  = coerce_odds(_first(sel, "oddsAmerican", "americanOdds", "odds", "price"))
-                    line  = _first(sel, "points", "line", "handicap", "spread")
+                    player = player_from_participants(sel.get("participants"))
+                    if player:
+                        break
+                # Fallback: strip prop-type words from market name
+                if not player:
+                    player = market.get("name") or ""
+                    player = player.replace(
+                        (market.get("marketType") or {}).get("name") or "", ""
+                    ).strip()
+                if not player:
+                    continue
 
-                    if "over" in label:
-                        entry["over_odds"] = odds
-                        if line is not None:
+                # Detect style: standard O/U vs. milestone thresholds
+                labels = [(s.get("label") or "").strip() for s in selections]
+                is_ou  = any(l.lower() in ("over", "under") for l in labels)
+
+                if is_ou:
+                    # Merge Over + Under selections into one entry per line value
+                    by_line: dict[str, dict] = {}
+                    for sel in selections:
+                        label = (sel.get("label") or "").strip().lower()
+                        odds  = coerce_odds(
+                            (sel.get("displayOdds") or {}).get("american")
+                        )
+                        raw_line = sel.get("milestoneValue") or sel.get("points")
+                        line_key = str(raw_line) if raw_line is not None else "?"
+
+                        entry = by_line.setdefault(line_key, {"player": player})
+                        if raw_line is not None:
                             try:
-                                entry["line"] = float(line)
+                                entry["line"] = float(raw_line)
                             except (ValueError, TypeError):
                                 pass
-                    elif "under" in label:
-                        entry["under_odds"] = odds
-                    elif "odds" not in entry:
-                        entry["odds"] = odds
+                        if label == "over":
+                            entry["over_odds"] = odds
+                        elif label == "under":
+                            entry["under_odds"] = odds
 
-                if entry.get("over_odds") is not None or entry.get("odds") is not None:
-                    prop_groups.setdefault(prop_type, {})[player_name] = entry
+                    for entry in by_line.values():
+                        if entry.get("over_odds") is not None or entry.get("under_odds") is not None:
+                            prop_groups.setdefault(prop_type, []).append(entry)
+
+                else:
+                    # Milestone style: each selection is one threshold ("5+", "10+", …)
+                    for sel in selections:
+                        label    = (sel.get("label") or "").strip()
+                        odds     = coerce_odds(
+                            (sel.get("displayOdds") or {}).get("american")
+                        )
+                        raw_line = sel.get("milestoneValue") or sel.get("points")
+
+                        entry: dict = {"player": player, "label": label}
+                        if raw_line is not None:
+                            try:
+                                entry["line"] = float(raw_line)
+                            except (ValueError, TypeError):
+                                pass
+                        # "5+" → over direction; anything else stored as plain odds
+                        if label.endswith("+"):
+                            entry["over_odds"] = odds
+                        else:
+                            entry["odds"] = odds
+
+                        if entry.get("over_odds") is not None or entry.get("odds") is not None:
+                            prop_groups.setdefault(prop_type, []).append(entry)
 
             if prop_groups:
                 seen.add(name)
-                results.append({
-                    "matchup": name,
-                    "markets": {k: list(v.values()) for k, v in prop_groups.items()},
-                })
+                results.append({"matchup": name, "markets": prop_groups})
 
     return results
 
