@@ -6,7 +6,6 @@ import re
 import sys
 from datetime import datetime, timezone
 
-import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 NBA_BASE = "https://sportsbook.draftkings.com/leagues/basketball/nba"
@@ -449,26 +448,31 @@ async def scrape_player_props(page) -> list[dict]:
 
 # ── PrizePicks ────────────────────────────────────────────────────────────────
 
-async def scrape_prizepicks() -> list[dict]:
-    """Fetch NBA player props from PrizePicks' public projections API.
+async def scrape_prizepicks(page) -> list[dict]:
+    """Fetch NBA player props from PrizePicks via an in-browser fetch() call.
 
-    The endpoint is unauthenticated. Response is JSON:API format:
+    Direct httpx requests get 403ed. Navigating to app.prizepicks.com first
+    gives the browser the right origin cookies/headers, then fetch() from
+    page.evaluate() inherits that session and bypasses the block.
+
+    Response is JSON:API format:
       data[]     — projections with stat_type, line_score, relationships
       included[] — new_player records with name, team, league
     """
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json",
-        "Referer": "https://app.prizepicks.com/",
-    }
-    async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
-        resp = await client.get(PRIZEPICKS_URL)
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        await page.goto("https://app.prizepicks.com", wait_until="domcontentloaded", timeout=20_000)
+        await asyncio.sleep(2)
+    except Exception as exc:
+        print(f"  [prizepicks] page load warning: {exc}")
+
+    data = await page.evaluate("""async () => {
+        const resp = await fetch(
+            'https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true',
+            { headers: { 'Accept': 'application/json', 'Referer': 'https://app.prizepicks.com/' } }
+        );
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+    }""")
 
     # Index players by ID from the included array
     players: dict[str, dict] = {}
@@ -627,7 +631,7 @@ async def main():
                 print(f"  ERROR: {exc}")
 
             try:
-                pp_props = await scrape_prizepicks()
+                pp_props = await scrape_prizepicks(page)
                 pp_out = save_prizepicks(pp_props, ts)
                 print(f"  prizepicks: {len(pp_props)} prop(s) -> {pp_out}")
             except Exception as exc:
