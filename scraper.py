@@ -459,19 +459,30 @@ async def scrape_prizepicks(page) -> list[dict]:
       data[]     — projections with stat_type, line_score, relationships
       included[] — new_player records with name, team, league
     """
+    print("  [prizepicks] navigating to app.prizepicks.com")
     try:
-        await page.goto("https://app.prizepicks.com", wait_until="domcontentloaded", timeout=20_000)
+        await page.goto("https://app.prizepicks.com", wait_until="domcontentloaded", timeout=10_000)
         await asyncio.sleep(2)
     except Exception as exc:
         print(f"  [prizepicks] page load warning: {exc}")
 
+    print("  [prizepicks] fetching API")
     data = await page.evaluate("""async () => {
-        const resp = await fetch(
-            'https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true',
-            { headers: { 'Accept': 'application/json', 'Referer': 'https://app.prizepicks.com/' } }
-        );
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        return resp.json();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        try {
+            const resp = await fetch(
+                'https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true',
+                {
+                    signal: controller.signal,
+                    headers: { 'Accept': 'application/json', 'Referer': 'https://app.prizepicks.com/' }
+                }
+            );
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.json();
+        } finally {
+            clearTimeout(timer);
+        }
     }""")
 
     # Index players by ID from the included array
@@ -630,12 +641,14 @@ async def main():
             except Exception as exc:
                 print(f"  ERROR: {exc}")
 
+            print("  [prizepicks] starting")
             try:
                 pp_props = await scrape_prizepicks(page)
                 pp_out = save_prizepicks(pp_props, ts)
                 print(f"  prizepicks: {len(pp_props)} prop(s) -> {pp_out}")
             except Exception as exc:
                 print(f"  ERROR (prizepicks): {exc}")
+            print("  [prizepicks] done")
 
             print(f"  sleeping {INTERVAL_SECONDS}s ...")
             await asyncio.sleep(INTERVAL_SECONDS)
