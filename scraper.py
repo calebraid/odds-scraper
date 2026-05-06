@@ -6,6 +6,7 @@ import re
 import sys
 from datetime import datetime, timezone
 
+import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 NBA_BASE = "https://sportsbook.draftkings.com/leagues/basketball/nba"
@@ -14,6 +15,18 @@ NBA_PLAYER_PROPS = f"{NBA_BASE}?category=games&subcategory=player-props"
 OUTPUT_DIR = "odds"
 INTERVAL_SECONDS = 60
 DEBUG = "--debug" in sys.argv
+
+PRIZEPICKS_URL = (
+    "https://api.prizepicks.com/projections"
+    "?league_id=7&per_page=250&single_stat=true"
+)
+PRIZEPICKS_OUTPUT = os.path.join(OUTPUT_DIR, "prizepicks_latest.json")
+
+# Normalize PrizePicks stat names to match DraftKings conventions
+_PP_STAT_NAMES: dict[str, str] = {
+    "3-Pointers Made": "Threes",
+    "Blocked Shots": "Blocks",
+}
 
 
 def parse_american_odds(text: str | None) -> int | None:
@@ -434,6 +447,80 @@ async def scrape_player_props(page) -> list[dict]:
     return _parse_dk_api_props(captured)
 
 
+# ── PrizePicks ────────────────────────────────────────────────────────────────
+
+async def scrape_prizepicks() -> list[dict]:
+    """Fetch NBA player props from PrizePicks' public projections API.
+
+    The endpoint is unauthenticated. Response is JSON:API format:
+      data[]     — projections with stat_type, line_score, relationships
+      included[] — new_player records with name, team, league
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Referer": "https://app.prizepicks.com/",
+    }
+    async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
+        resp = await client.get(PRIZEPICKS_URL)
+        resp.raise_for_status()
+        data = resp.json()
+
+    # Index players by ID from the included array
+    players: dict[str, dict] = {}
+    for item in (data.get("included") or []):
+        if item.get("type") == "new_player":
+            players[item["id"]] = item.get("attributes", {})
+
+    props: list[dict] = []
+    for proj in (data.get("data") or []):
+        if proj.get("type") != "projection":
+            continue
+        attrs = proj.get("attributes", {})
+
+        player_id = (
+            (proj.get("relationships") or {})
+            .get("new_player", {})
+            .get("data", {})
+            .get("id")
+        )
+        player = players.get(player_id, {})
+
+        if player.get("league") != "NBA":
+            continue
+
+        raw_stat = attrs.get("stat_type") or ""
+        stat_type = _PP_STAT_NAMES.get(raw_stat, raw_stat)
+
+        props.append({
+            "player": player.get("name"),
+            "team": player.get("team"),
+            "stat_type": stat_type,
+            "line": attrs.get("line_score"),
+            "start_time": attrs.get("start_time"),
+        })
+
+    return props
+
+
+def save_prizepicks(props: list[dict], timestamp: str) -> str:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    payload = {
+        "source": "PrizePicks",
+        "league": "NBA",
+        "scraped_at": timestamp,
+        "count": len(props),
+        "props": props,
+    }
+    with open(PRIZEPICKS_OUTPUT, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return PRIZEPICKS_OUTPUT
+
+
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def _save_debug_html(html: str, filename: str) -> None:
@@ -538,6 +625,13 @@ async def main():
 
             except Exception as exc:
                 print(f"  ERROR: {exc}")
+
+            try:
+                pp_props = await scrape_prizepicks()
+                pp_out = save_prizepicks(pp_props, ts)
+                print(f"  prizepicks: {len(pp_props)} prop(s) -> {pp_out}")
+            except Exception as exc:
+                print(f"  ERROR (prizepicks): {exc}")
 
             print(f"  sleeping {INTERVAL_SECONDS}s ...")
             await asyncio.sleep(INTERVAL_SECONDS)
