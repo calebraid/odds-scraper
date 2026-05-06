@@ -459,31 +459,15 @@ async def scrape_prizepicks(page) -> list[dict]:
       data[]     — projections with stat_type, line_score, relationships
       included[] — new_player records with name, team, league
     """
-    print("  [prizepicks] navigating to app.prizepicks.com")
-    try:
-        await page.goto("https://app.prizepicks.com", wait_until="domcontentloaded", timeout=10_000)
-        await asyncio.sleep(2)
-    except Exception as exc:
-        print(f"  [prizepicks] page load warning: {exc}")
-
-    print("  [prizepicks] fetching API")
-    data = await page.evaluate("""async () => {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 15000);
-        try {
-            const resp = await fetch(
-                'https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true',
-                {
-                    signal: controller.signal,
-                    headers: { 'Accept': 'application/json', 'Referer': 'https://app.prizepicks.com/' }
-                }
-            );
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-            return resp.json();
-        } finally {
-            clearTimeout(timer);
-        }
-    }""")
+    print("  [prizepicks] navigating to API URL")
+    await page.goto(
+        "https://api.prizepicks.com/projections?league_id=7&per_page=250&single_stat=true",
+        wait_until="domcontentloaded",
+        timeout=15_000,
+    )
+    print("  [prizepicks] reading response body")
+    content = await page.inner_text("body")
+    data = json.loads(content)
 
     # Index players by ID from the included array
     players: dict[str, dict] = {}
