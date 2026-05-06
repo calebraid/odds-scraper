@@ -199,125 +199,148 @@ async def _intercept_props_api(page) -> list[tuple[str, any]]:
 
 
 def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
-    """Parse player props out of captured DraftKings API responses.
+    """Parse player props from DraftKings' normalized flat API response.
 
-    DK's sportsbook-nash API response shape (as of 2024-2026):
+    Actual shape (confirmed from live interception):
       {
-        "eventGroup": {
-          "events": [
-            {
-              "eventId": ...,
-              "name": "Team A @ Team B",       # or teamName1/teamName2
-              "eventCategories": [
-                {
-                  "name": "Player Props",
-                  "componentizedOffers": [
-                    {
-                      "subcategoryName": "Points",
-                      "offers": [
-                        {
-                          "outcomes": [
-                            {
-                              "participant": "Anthony Edwards",
-                              "label": "Over",
-                              "oddsAmerican": "-115",
-                              "line": 25.5
-                            },
-                            { "participant": "...", "label": "Under", ... }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
+        "sports": [...],
+        "leagues": [...],
+        "events":     [{ "id": "34074632", "name": "LA Lakers @ OKC Thunder", ... }],
+        "markets":    [{ "id": "...", "eventId": "34074632", "name": "...", ... }],
+        "selections": [{ "id": "...", "marketId": "...", "points": 25.5, ... }],
+        "subscriptionPartials": [...]
       }
+
+    Join path: events[id] <- markets[eventId] <- selections[marketId]
+
+    Player name is embedded in markets[].name (common formats:
+      "Anthony Edwards - Points"  or  "Anthony Edwards Points O/U").
+    Prop type (e.g. "Points") comes from markets[].groupName when present,
+    otherwise inferred by stripping the player name from markets[].name.
     """
     results: list[dict] = []
-    seen_matchups: set[str] = set()
+    seen: set[str] = set()
+
+    def _first(obj: dict, *keys):
+        for k in keys:
+            v = obj.get(k)
+            if v is not None:
+                return v
+        return None
 
     def coerce_odds(val) -> int | None:
-        if val is None:
-            return None
-        return parse_american_odds(str(val))
+        return None if val is None else parse_american_odds(str(val))
 
     for url, body in captured:
-        # Unwrap top-level envelope
         if not isinstance(body, dict):
             continue
-        eg = body.get("eventGroup") or {}
-        events = eg.get("events") or body.get("events") or []
 
-        for event in events:
+        raw_events     = body.get("events") or []
+        raw_markets    = body.get("markets") or []
+        raw_selections = body.get("selections") or []
+
+        if not raw_events or not raw_markets:
+            continue
+
+        # ── Index selections by marketId ──────────────────────────────────
+        sels_by_market: dict[str, list[dict]] = {}
+        for sel in raw_selections:
+            if not isinstance(sel, dict):
+                continue
+            mid = str(_first(sel, "marketId", "market_id") or "")
+            if mid:
+                sels_by_market.setdefault(mid, []).append(sel)
+
+        # ── Index markets by eventId ──────────────────────────────────────
+        markets_by_event: dict[str, list[dict]] = {}
+        for m in raw_markets:
+            if not isinstance(m, dict):
+                continue
+            eid = str(_first(m, "eventId", "event_id") or "")
+            if eid:
+                markets_by_event.setdefault(eid, []).append(m)
+
+        # ── Process each event ────────────────────────────────────────────
+        for event in raw_events:
             if not isinstance(event, dict):
                 continue
-
-            # Build matchup label
-            name = (event.get("name") or "").strip()
-            if not name:
-                t1 = event.get("teamName1") or (event.get("homeTeam") or {}).get("name", "")
-                t2 = event.get("teamName2") or (event.get("awayTeam") or {}).get("name", "")
-                name = f"{t2} @ {t1}" if t1 and t2 else ""
-            if not name or name in seen_matchups:
+            eid  = str(_first(event, "id", "eventId") or "")
+            name = (_first(event, "name", "eventName") or "").strip()
+            if not name or name in seen:
                 continue
 
-            markets: dict[str, list] = {}
+            event_markets = markets_by_event.get(eid, [])
+            if not event_markets:
+                continue
 
-            for cat in (event.get("eventCategories") or []):
-                cat_name = (cat.get("name") or cat.get("nameIdentifier") or "").lower()
-                if "prop" not in cat_name:
+            # prop_type -> player_name -> entry
+            prop_groups: dict[str, dict[str, dict]] = {}
+
+            for market in event_markets:
+                mid         = str(_first(market, "id", "marketId") or "")
+                market_name = (_first(market, "name", "marketName") or "").strip()
+                # groupName / subcategoryName gives the prop type directly
+                group_name  = (
+                    _first(market, "groupName", "subcategoryName",
+                           "betOfferTypeName", "typeName") or ""
+                ).strip()
+
+                # ── Extract player name and prop type from market name ────
+                # Formats seen: "Anthony Edwards - Points"
+                #               "Anthony Edwards Points O/U"
+                player_name = (_first(market, "participant", "playerName") or "").strip()
+                prop_type   = group_name or ""
+
+                if not player_name and " - " in market_name:
+                    left, right = [p.strip() for p in market_name.split(" - ", 1)]
+                    # Shorter right side → it's the prop type; left is the player
+                    if len(right.split()) <= 4:
+                        player_name = left
+                        if not prop_type:
+                            prop_type = right.replace(" O/U", "").replace(" Over/Under", "")
+                    else:
+                        player_name = right
+                        if not prop_type:
+                            prop_type = left.replace(" O/U", "").replace(" Over/Under", "")
+                elif not player_name and group_name and market_name:
+                    # market name IS the player name when group_name is set separately
+                    player_name = market_name.replace(" O/U", "").replace(" Over/Under", "").strip()
+
+                if not player_name or not prop_type:
                     continue
 
-                for comp in (cat.get("componentizedOffers") or []):
-                    market_name = (
-                        comp.get("subcategoryName")
-                        or comp.get("name")
-                        or "Props"
-                    )
-                    outcomes_list: list[dict] = []
+                # ── Join selections ───────────────────────────────────────
+                selections = sels_by_market.get(mid, [])
+                if not selections:
+                    continue
 
-                    for offer in (comp.get("offers") or []):
-                        raw_outcomes = offer.get("outcomes") or []
+                entry: dict = {"player": player_name}
+                for sel in selections:
+                    label = (_first(sel, "name", "label", "type") or "").lower()
+                    odds  = coerce_odds(_first(sel, "oddsAmerican", "americanOdds", "odds", "price"))
+                    line  = _first(sel, "points", "line", "handicap", "spread")
 
-                        # Group by participant so each player becomes one row
-                        by_player: dict[str, dict] = {}
-                        for o in raw_outcomes:
-                            player = (
-                                o.get("participant")
-                                or o.get("label", "").split(" Over ")[0].split(" Under ")[0]
-                            ).strip()
-                            if not player:
-                                continue
-                            label = (o.get("label") or o.get("type") or "").lower()
-                            odds = coerce_odds(o.get("oddsAmerican") or o.get("odds"))
-                            line = o.get("line")
+                    if "over" in label:
+                        entry["over_odds"] = odds
+                        if line is not None:
+                            try:
+                                entry["line"] = float(line)
+                            except (ValueError, TypeError):
+                                pass
+                    elif "under" in label:
+                        entry["under_odds"] = odds
+                    elif "odds" not in entry:
+                        entry["odds"] = odds
 
-                            entry = by_player.setdefault(player, {"player": player})
-                            if "over" in label:
-                                entry["over_odds"] = odds
-                                if line is not None:
-                                    try:
-                                        entry["line"] = float(line)
-                                    except (ValueError, TypeError):
-                                        pass
-                            elif "under" in label:
-                                entry["under_odds"] = odds
-                            else:
-                                entry["odds"] = odds
+                if entry.get("over_odds") is not None or entry.get("odds") is not None:
+                    prop_groups.setdefault(prop_type, {})[player_name] = entry
 
-                        for entry in by_player.values():
-                            if entry.get("over_odds") is not None or entry.get("odds") is not None:
-                                outcomes_list.append(entry)
-
-                    if outcomes_list:
-                        markets[market_name] = outcomes_list
-
-            if markets:
-                seen_matchups.add(name)
-                results.append({"matchup": name, "markets": markets})
+            if prop_groups:
+                seen.add(name)
+                results.append({
+                    "matchup": name,
+                    "markets": {k: list(v.values()) for k, v in prop_groups.items()},
+                })
 
     return results
 
@@ -325,26 +348,32 @@ def _parse_dk_api_props(captured: list[tuple[str, any]]) -> list[dict]:
 async def scrape_player_props(page) -> list[dict]:
     """Intercept DraftKings' internal API calls to extract player props.
 
-    This avoids navigating to individual event pages (which DK blocks for
-    headless browsers) by capturing the JSON the league page fetches itself.
+    Avoids individual event pages (blocked for headless browsers) by
+    capturing the JSON responses the props subcategory page fetches itself.
     """
     captured = await _intercept_props_api(page)
 
     print(f"  [props] intercepted {len(captured)} API response(s)")
     for url, body in captured:
-        eg = body.get("eventGroup", {}) if isinstance(body, dict) else {}
-        n_events = len(eg.get("events") or body.get("events") or [])
+        if not isinstance(body, dict):
+            continue
+        n_events  = len(body.get("events") or [])
+        n_markets = len(body.get("markets") or [])
+        n_sels    = len(body.get("selections") or [])
         print(f"    {url}")
-        print(f"      top-level keys: {list(body.keys()) if isinstance(body, dict) else 'list'}"
-              f"  events: {n_events}")
+        print(f"      keys={list(body.keys())}  "
+              f"events={n_events}  markets={n_markets}  selections={n_sels}")
+        # Log first market and selection to confirm field names
+        if n_markets:
+            print(f"      market[0]={json.dumps(body['markets'][0])[:200]}")
+        if n_sels:
+            print(f"      selection[0]={json.dumps(body['selections'][0])[:200]}")
 
     results = _parse_dk_api_props(captured)
 
     if not results and captured:
-        # Dump the first (largest) response body for selector diagnosis
         url, body = captured[0]
-        print(f"  [props] parse found 0 results — dumping first response ({url}):")
-        print(f"    {json.dumps(body)[:800]}")
+        print(f"  [props] 0 results — first response body[:800]: {json.dumps(body)[:800]}")
 
     return results
 
