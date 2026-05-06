@@ -150,19 +150,25 @@ _DK_API_DOMAINS = ("sportsbook-nash.draftkings.com", "api.draftkings.com")
 
 
 async def _intercept_props_api(page) -> list[tuple[str, any]]:
-    """Navigate to the player-props subcategory page and capture every JSON
-    response from DK's internal API domains.  The listener is registered
-    before navigation so no early calls are missed.
+    """Navigate to the player-props page, then click through every subcategory
+    tab (Points, Rebounds, Assists, Threes, …) to trigger a separate API call
+    per tab.  All responses are collected into one list.
 
-    Returns a list of (url, parsed_body) pairs, largest bodies first so the
-    main event-data response (usually the biggest) is tried first.
+    DK hardcodes a subcategoryId per tab, so the initial page load only fires
+    the API for the default tab (Points Milestones).  Clicking each tab fires
+    a fresh request for that category's markets/selections.
+
+    Returns a list of (url, parsed_body) pairs, largest bodies first.
     """
     captured: list[tuple[str, any]] = []
+    seen_urls: set[str] = set()
 
     async def on_response(response):
         if response.status != 200:
             return
         url = response.url
+        if url in seen_urls:
+            return
         if not any(d in url for d in _DK_API_DOMAINS):
             return
         if "json" not in response.headers.get("content-type", ""):
@@ -171,29 +177,63 @@ async def _intercept_props_api(page) -> list[tuple[str, any]]:
             body = await response.json()
         except Exception:
             return
-        # Skip trivially small responses (analytics pings, feature flags, etc.)
-        body_str = json.dumps(body)
-        if len(body_str) < 500:
+        if len(json.dumps(body)) < 500:
             return
+        seen_urls.add(url)
         captured.append((url, body))
 
     page.on("response", on_response)
+
+    # ── Initial page load (fires default tab — usually Points) ────────────
     try:
         await page.goto(NBA_PLAYER_PROPS, wait_until="domcontentloaded", timeout=30_000)
-        await page.wait_for_selector(
-            ".cms-market-selector-static__event-wrapper", timeout=15_000
-        )
+        await page.wait_for_selector(".cms-market-selector-static__event-wrapper", timeout=15_000)
     except PlaywrightTimeoutError:
-        pass  # Carry on — API calls may still have fired
-
-    # Extra wait + scroll to trigger any lazy-loaded prop requests
+        pass
     await asyncio.sleep(3)
-    await scroll_to_bottom(page, ".cms-market-selector-static__event-wrapper")
-    await asyncio.sleep(2)
+
+    # ── Click through every subcategory tab ───────────────────────────────
+    # DK renders tabs as <li> or <button> elements inside a tab-switcher.
+    # Try both selector families; collect unique tab handles.
+    tab_sels = [
+        "li.sportsbook-tabbed-subheader__tab",
+        "button.sportsbook-tabbed-subheader__tab",
+        "[data-testid='subcategory-tab']",
+        "li[class*='tab-item']",
+        "button[class*='subcategory']",
+    ]
+    tabs = []
+    for sel in tab_sels:
+        tabs = await page.query_selector_all(sel)
+        if tabs:
+            print(f"  [props] found {len(tabs)} subcategory tab(s) via {sel!r}")
+            break
+
+    if not tabs:
+        # Fallback: grab any clickable tab-like elements inside a nav/header
+        tabs = await page.query_selector_all("nav li, nav button, [role='tab']")
+        print(f"  [props] fallback tab selector: {len(tabs)} candidates")
+
+    before_click = len(captured)
+    for i, tab in enumerate(tabs):
+        try:
+            label = (await tab.inner_text()).strip()
+            # Skip the first tab — already loaded on initial navigation
+            if i == 0:
+                print(f"  [props] tab 0 ({label!r}) already loaded, skipping click")
+                continue
+            print(f"  [props] clicking tab {i} ({label!r})")
+            await tab.click()
+            # Wait briefly for the API response to arrive
+            await asyncio.sleep(2)
+        except Exception as exc:
+            print(f"  [props] tab {i} click failed: {exc}")
+
+    new_responses = len(captured) - before_click
+    print(f"  [props] tab clicks triggered {new_responses} new API response(s)")
 
     page.remove_listener("response", on_response)
 
-    # Largest responses first — the main odds payload is usually the biggest
     captured.sort(key=lambda t: len(json.dumps(t[1])), reverse=True)
     return captured
 
