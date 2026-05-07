@@ -17,7 +17,9 @@ INTERVAL_SECONDS = 60
 DEBUG = "--debug" in sys.argv
 
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
+KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY", "")
 PLAYER_PROPS_OUTPUT = os.path.join(OUTPUT_DIR, "player_props_latest.json")
+KALSHI_OUTPUT = os.path.join(OUTPUT_DIR, "kalshi_latest.json")
 
 _MARKET_NAMES = {
     "player_points": "Points",
@@ -565,6 +567,67 @@ def save_player_props(props: list[dict], timestamp: str) -> str:
     return PLAYER_PROPS_OUTPUT
 
 
+# ── Kalshi NBA markets ────────────────────────────────────────────────────────
+
+async def scrape_kalshi_nba() -> list[dict]:
+    """Fetch all open NBA markets from Kalshi (series_ticker=KXNBA).
+
+    Requires KALSHI_API_KEY env var. Uses Authorization header as documented.
+    Response markets contain yes/no ask prices (0-100 cents scale) and volume.
+    """
+    if not KALSHI_API_KEY:
+        raise RuntimeError("KALSHI_API_KEY environment variable not set")
+
+    markets: list[dict] = []
+    cursor: str | None = None
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        while True:
+            params: dict = {"status": "open", "series_ticker": "KXNBA", "limit": 200}
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = await client.get(
+                "https://trading-api.kalshi.com/trade-api/v2/markets",
+                params=params,
+                headers={"Authorization": KALSHI_API_KEY},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            for m in (data.get("markets") or []):
+                markets.append({
+                    "ticker": m.get("ticker"),
+                    "event_ticker": m.get("event_ticker"),
+                    "title": m.get("title"),
+                    "yes_price": m.get("yes_ask"),
+                    "no_price": m.get("no_ask"),
+                    "volume": m.get("volume"),
+                    "open_interest": m.get("open_interest"),
+                    "status": m.get("status"),
+                })
+
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
+    return markets
+
+
+def save_kalshi(markets: list[dict], timestamp: str) -> str:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    payload = {
+        "source": "Kalshi",
+        "league": "NBA",
+        "scraped_at": timestamp,
+        "count": len(markets),
+        "markets": markets,
+    }
+    with open(KALSHI_OUTPUT, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return KALSHI_OUTPUT
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 async def main():
@@ -644,6 +707,13 @@ async def main():
                 print(f"  odds-api props: {len(pp)} prop(s) -> {pp_out}")
             except Exception as exc:
                 print(f"  ERROR (odds-api): {exc}")
+
+            try:
+                km = await scrape_kalshi_nba()
+                km_out = save_kalshi(km, ts)
+                print(f"  kalshi: {len(km)} market(s) -> {km_out}")
+            except Exception as exc:
+                print(f"  ERROR (kalshi): {exc}")
 
             print(f"  sleeping {INTERVAL_SECONDS}s ...")
             await asyncio.sleep(INTERVAL_SECONDS)
