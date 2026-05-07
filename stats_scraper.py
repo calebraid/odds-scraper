@@ -16,13 +16,33 @@ SEASON = 2025  # 2025-26 NBA season
 
 
 def _extract_list(data) -> list[dict]:
-    """Return list regardless of whether response is bare array or wrapped object."""
+    """Return list of dicts regardless of response shape.
+
+    Handles three cases the nbaapi sometimes returns:
+      1. Bare list of dicts  (normal)
+      2. Wrapped object with a list under a known key
+      3. List of JSON strings instead of dicts (API bug / double-encoding)
+    """
+    raw: list = []
     if isinstance(data, list):
-        return data
-    for key in ("data", "results", "players", "games", "items"):
-        if isinstance(data.get(key), list):
-            return data[key]
-    return []
+        raw = data
+    else:
+        for key in ("data", "results", "players", "games", "items"):
+            if isinstance(data.get(key), list):
+                raw = data[key]
+                break
+
+    # Deserialize any items that arrived as JSON strings instead of dicts
+    out: list[dict] = []
+    for item in raw:
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(item, dict):
+            out.append(item)
+    return out
 
 
 async def _fetch_paginated(client: httpx.AsyncClient, path: str, params: dict) -> list[dict]:
@@ -131,6 +151,8 @@ def _parse_team_stats_from_games(games: list[dict]) -> tuple[list[dict], list[di
 
     for g in games:
         try:
+            if isinstance(g, str):
+                g = json.loads(g)
             date = (g.get("date") or g.get("gameDate") or "")[:10]
 
             # Layout A: teamGameBasicStats list
