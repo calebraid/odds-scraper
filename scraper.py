@@ -70,7 +70,10 @@ async def scrape_kalshi_nba() -> list[dict]:
             resp.raise_for_status()
             data = resp.json()
 
-            for m in (data.get("markets") or []):
+            raw_markets = data.get("markets") or []
+            if raw_markets:
+                print(f"  [kalshi] first market raw fields: {json.dumps(raw_markets[0], indent=2)}")
+            for m in raw_markets:
                 markets.append({
                     "ticker": m.get("ticker"),
                     "event_ticker": m.get("event_ticker"),
