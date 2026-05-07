@@ -59,11 +59,14 @@ async def scrape_kalshi_nba() -> list[dict]:
             if cursor:
                 params["cursor"] = cursor
 
+            hdrs = make_kalshi_headers("GET", path)
+            print(f"  [kalshi] request headers: {hdrs}")
             resp = await client.get(
                 f"{KALSHI_BASE}{path}",
                 params=params,
-                headers=make_kalshi_headers("GET", path),
+                headers=hdrs,
             )
+            print(f"  [kalshi] response status: {resp.status_code}")
             resp.raise_for_status()
             data = resp.json()
 
@@ -102,6 +105,10 @@ def save(markets: list[dict], timestamp: str) -> str:
 
 async def main():
     print(f"Kalshi NBA scraper  |  interval={INTERVAL_SECONDS}s")
+    print(f"  KALSHI_API_KEY_ID  : {_KEY_ID!r}")
+    _key_preview = (_KEY_PEM[:20] + "...") if _KEY_PEM else "NOT SET"
+    print(f"  KALSHI_PRIVATE_KEY : {_key_preview!r}")
+    print(f"  private key loaded : {_private_key is not None}")
     run = 0
     while True:
         run += 1
