@@ -161,6 +161,44 @@ def get_nba_kalshi(auth: Annotated[dict, Depends(authenticate)], response: Respo
     return JSONResponse(content=result, headers=dict(response.headers))
 
 
+@app.get("/predictions", summary="Latest AI predictions for Kalshi markets")
+def get_predictions(auth: Annotated[dict, Depends(authenticate)], response: Response):
+    _set_rate_limit_headers(response, auth)
+    data = load_odds("predictions_latest.json")
+    warning = staleness_warning(data.get("generated_at"))
+    result = {
+        "generated_at": data.get("generated_at"),
+        "count": data.get("count", len(data.get("predictions", []))),
+        "by_type": data.get("by_type", {}),
+        "predictions": data.get("predictions", []),
+    }
+    if warning:
+        result["warning"] = warning
+    return JSONResponse(content=result, headers=dict(response.headers))
+
+
+@app.get("/predictions/accuracy", summary="Prediction model accuracy stats")
+def get_predictions_accuracy(auth: Annotated[dict, Depends(authenticate)], response: Response):
+    _set_rate_limit_headers(response, auth)
+    path = os.path.join(_BASE, "stats", "prediction_history.json")
+    if not os.path.exists(path):
+        return JSONResponse(
+            content={"total_predictions": 0, "resolved_predictions": 0, "correct": 0, "accuracy_pct": None, "by_type": {}},
+            headers=dict(response.headers),
+        )
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    result = {
+        "updated_at": data.get("updated_at"),
+        "total_predictions": data.get("total_predictions", 0),
+        "resolved_predictions": data.get("resolved_predictions", 0),
+        "correct": data.get("correct", 0),
+        "accuracy_pct": data.get("accuracy_pct"),
+        "by_type": data.get("by_type", {}),
+    }
+    return JSONResponse(content=result, headers=dict(response.headers))
+
+
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
 def dashboard():
     return HTMLResponse(content=_DASHBOARD_HTML)
