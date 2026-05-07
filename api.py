@@ -115,6 +115,33 @@ def get_usage(auth: Annotated[dict, Depends(authenticate)], response: Response):
     }
 
 
+@app.get("/odds/nba", summary="NBA game lines")
+def get_nba_odds(auth: Annotated[dict, Depends(authenticate)], response: Response):
+    _set_rate_limit_headers(response, auth)
+    data = load_odds("latest.json")
+    warning = staleness_warning(data.get("scraped_at"))
+    if warning:
+        data["warning"] = warning
+    return JSONResponse(content=data, headers=dict(response.headers))
+
+
+@app.get("/odds/nba/props", summary="NBA player props")
+def get_nba_props(auth: Annotated[dict, Depends(authenticate)], response: Response):
+    _set_rate_limit_headers(response, auth)
+    data = load_odds("player_props_latest.json")
+    warning = staleness_warning(data.get("scraped_at"))
+    result = {
+        "source": data.get("source"),
+        "league": data.get("league"),
+        "scraped_at": data.get("scraped_at"),
+        "count": data.get("count", len(data.get("props", []))),
+        "props": data.get("props", []),
+    }
+    if warning:
+        result["warning"] = warning
+    return JSONResponse(content=result, headers=dict(response.headers))
+
+
 @app.get("/odds/nba/kalshi", summary="NBA prediction markets from Kalshi")
 def get_nba_kalshi(auth: Annotated[dict, Depends(authenticate)], response: Response):
     _set_rate_limit_headers(response, auth)
@@ -132,9 +159,282 @@ def get_nba_kalshi(auth: Annotated[dict, Depends(authenticate)], response: Respo
     return JSONResponse(content=result, headers=dict(response.headers))
 
 
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+def dashboard():
+    return HTMLResponse(content=_DASHBOARD_HTML)
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def landing_page():
     return HTMLResponse(content=_LANDING_HTML)
+
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>OddsAPI — Live Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0a0a;--card:#111111;--gold:#FFD700;--gold-dim:rgba(255,215,0,.1);--gold-glow:rgba(255,215,0,.07);--text:#fff;--dim:#666;--border:rgba(255,215,0,.12);--border-h:rgba(255,215,0,.5);--pos:#00c853;--neg:#ff4444}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;min-height:100vh}
+
+nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:.875rem 2rem;background:rgba(10,10,10,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
+.logo{font-size:1.1rem;font-weight:900;color:var(--gold);text-decoration:none;letter-spacing:-.5px}
+.nav-links{display:flex;gap:2rem}
+.nav-links a{color:var(--dim);text-decoration:none;font-size:.875rem;font-weight:500;transition:color .2s}
+.nav-links a:hover{color:var(--text)}
+.nav-links a.active{color:var(--gold)}
+.nav-status{display:flex;align-items:center;gap:.5rem;font-size:.75rem;font-family:'JetBrains Mono',monospace;color:var(--dim)}
+.live-dot{width:6px;height:6px;background:var(--pos);border-radius:50%;animation:blink 2s infinite;flex-shrink:0}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+main{max-width:1400px;margin:0 auto;padding:2.5rem 2rem 5rem;display:flex;flex-direction:column;gap:3.5rem}
+
+.sec-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;gap:1rem}
+.sec-title{font-size:1.25rem;font-weight:800;letter-spacing:-.5px}
+.sec-title em{font-style:normal;color:var(--gold)}
+.src-badge{background:var(--gold-dim);border:1px solid var(--border);color:var(--gold);font-size:.65rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:.2rem .65rem;border-radius:4px;white-space:nowrap}
+
+.cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:1.25rem}
+
+.game-card{background:rgba(17,17,17,.9);border:1px solid var(--border);border-radius:16px;padding:1.375rem 1.5rem;backdrop-filter:blur(10px);transition:transform .25s,border-color .25s,box-shadow .25s}
+.game-card:hover{transform:translateY(-3px);border-color:var(--border-h);box-shadow:0 0 40px var(--gold-glow),0 20px 40px rgba(0,0,0,.5)}
+.game-card-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.125rem;gap:.75rem}
+.matchup{font-size:1rem;font-weight:700;line-height:1.3}
+.g-badge{font-size:.68rem;font-weight:700;letter-spacing:.5px;padding:.2rem .6rem;border-radius:4px;white-space:nowrap;flex-shrink:0}
+.b-live{background:rgba(255,68,68,.15);color:#ff6060;border:1px solid rgba(255,68,68,.3)}
+.b-up{background:rgba(255,255,255,.05);color:var(--dim);border:1px solid rgba(255,255,255,.08)}
+.odds-cols{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem}
+.ocol-lbl{font-size:.62rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold);margin-bottom:.5rem}
+.orow{display:flex;justify-content:space-between;align-items:center;padding:.3rem 0}
+.orow+.orow{border-top:1px solid rgba(255,255,255,.05)}
+.side{font-size:.72rem;color:var(--dim);font-weight:500}
+.oval{font-size:.82rem;font-weight:700;font-family:'JetBrains Mono',monospace}
+.lval{font-size:.78rem;color:var(--text);font-family:'JetBrains Mono',monospace;margin-right:.25rem}
+.pos{color:var(--pos)}
+.neg{color:var(--neg)}
+
+.props-game{margin-bottom:1.75rem}
+.props-game-title{font-size:.875rem;font-weight:700;color:var(--gold);margin-bottom:.75rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}
+.props-stat{margin-bottom:1rem}
+.props-stat-lbl{font-size:.65rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);margin-bottom:.5rem}
+.props-tbl{background:rgba(17,17,17,.9);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.prow{display:grid;grid-template-columns:1fr 60px 90px 90px;gap:.75rem;align-items:center;padding:.6rem 1rem;font-size:.82rem;transition:background .15s}
+.prow:hover{background:rgba(255,215,0,.03)}
+.prow+.prow{border-top:1px solid rgba(255,255,255,.04)}
+.pname{font-weight:600}
+.pline{font-family:'JetBrains Mono',monospace;color:var(--dim);text-align:right}
+.plbl{font-size:.65rem;color:var(--dim);margin-left:.25rem}
+
+.kalshi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:1rem}
+.k-card{background:rgba(17,17,17,.9);border:1px solid var(--border);border-radius:16px;padding:1.375rem;backdrop-filter:blur(10px);transition:transform .25s,border-color .25s,box-shadow .25s;display:flex;flex-direction:column;gap:.875rem}
+.k-card:hover{transform:translateY(-3px);border-color:var(--border-h);box-shadow:0 0 40px var(--gold-glow),0 20px 40px rgba(0,0,0,.5)}
+.k-team{font-size:.95rem;font-weight:800;letter-spacing:-.3px}
+.k-pct{font-size:2.5rem;font-weight:900;color:var(--gold);letter-spacing:-2px;line-height:1}
+.k-pct sup{font-size:1rem;font-weight:500;color:rgba(255,215,0,.6);letter-spacing:0}
+.bar-track{height:6px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden;margin-top:.375rem}
+.bar-fill{height:100%;background:linear-gradient(90deg,var(--gold),#ffb300);border-radius:3px;transition:width .6s ease}
+.k-stats{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
+.k-stat{background:rgba(255,255,255,.03);border-radius:8px;padding:.5rem .625rem}
+.k-stat-full{grid-column:1/-1}
+.k-slbl{font-size:.6rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);margin-bottom:.2rem}
+.k-sval{font-size:.85rem;font-weight:700;font-family:'JetBrains Mono',monospace}
+
+.empty{grid-column:1/-1;background:rgba(17,17,17,.6);border:1px dashed rgba(255,255,255,.08);border-radius:12px;padding:2.5rem;text-align:center;color:var(--dim);font-size:.875rem}
+.empty-icon{font-size:2rem;margin-bottom:.75rem;opacity:.4}
+.loading{grid-column:1/-1;display:flex;gap:.75rem;justify-content:center;padding:2rem;color:var(--dim);font-size:.875rem;align-items:center}
+.spinner{width:16px;height:16px;border:2px solid rgba(255,215,0,.2);border-top-color:var(--gold);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+@media(max-width:900px){.cards-grid{grid-template-columns:1fr}.odds-cols{gap:.5rem}}
+@media(max-width:768px){.nav-links{display:none}.kalshi-grid{grid-template-columns:repeat(2,1fr)}main{padding:1.5rem 1rem 3rem}}
+@media(max-width:480px){.kalshi-grid{grid-template-columns:1fr}.prow{grid-template-columns:1fr 50px 70px 70px;gap:.5rem;font-size:.78rem}}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:#222;border-radius:3px}
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="logo">&#9889; OddsAPI</a>
+  <div class="nav-links">
+    <a href="/dashboard" class="active">Dashboard</a>
+    <a href="/docs">Docs</a>
+    <a href="/">Home</a>
+  </div>
+  <div class="nav-status">
+    <span class="live-dot"></span>
+    <span id="ts">Loading&hellip;</span>
+  </div>
+</nav>
+
+<main>
+  <section>
+    <div class="sec-hdr">
+      <h2 class="sec-title">Game <em>Lines</em></h2>
+      <span class="src-badge">DraftKings</span>
+    </div>
+    <div class="cards-grid" id="gl-grid">
+      <div class="loading"><div class="spinner"></div>Loading game lines&hellip;</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-hdr">
+      <h2 class="sec-title">Player <em>Props</em></h2>
+      <span class="src-badge">The Odds API</span>
+    </div>
+    <div id="props-wrap">
+      <div class="loading"><div class="spinner"></div>Loading player props&hellip;</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-hdr">
+      <h2 class="sec-title">NBA Finals <em>Markets</em></h2>
+      <span class="src-badge">Kalshi</span>
+    </div>
+    <div class="kalshi-grid" id="k-grid">
+      <div class="loading"><div class="spinner"></div>Loading Kalshi markets&hellip;</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const KEY = 'free-demo-key-abc123';
+let lastFetch = null;
+
+const fmtOdds = n => n == null ? '&mdash;' : n > 0 ? '+' + n : String(n);
+const oc = n => n == null ? '' : n > 0 ? 'pos' : 'neg';
+const pct = v => Math.round(parseFloat(v || 0) * 100);
+const fmtVol = v => {
+  const n = parseFloat(v);
+  if (isNaN(n) || n === 0) return '&mdash;';
+  if (n >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+  return '$' + n.toFixed(0);
+};
+
+async function get(path) {
+  const r = await fetch(path, {headers: {'X-API-Key': KEY}});
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+function renderGL(data) {
+  const el = document.getElementById('gl-grid');
+  if (!data?.games) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">&#127936;</div>Game lines unavailable &mdash; data source not active.</div>';
+    return;
+  }
+  if (!data.games.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">&#127936;</div>No games scheduled right now.</div>';
+    return;
+  }
+  const orow = (side, line, odds) =>
+    `<div class="orow"><span class="side">${side}</span><span>${line != null ? `<span class="lval">${line}</span>` : ''}<span class="oval ${oc(odds)}">${fmtOdds(odds)}</span></span></div>`;
+  const ocol = (lbl, rows) =>
+    `<div><div class="ocol-lbl">${lbl}</div>${rows}</div>`;
+  el.innerHTML = data.games.map(g => {
+    const live = g.score != null;
+    const badge = live
+      ? `<span class="g-badge b-live">LIVE ${g.score.away}&ndash;${g.score.home}</span>`
+      : `<span class="g-badge b-up">${g.game_time || 'Upcoming'}</span>`;
+    return `<div class="game-card">
+  <div class="game-card-hdr"><span class="matchup">${g.matchup}</span>${badge}</div>
+  <div class="odds-cols">
+    ${ocol('Spread', orow('Away', g.spread?.away?.line, g.spread?.away?.odds) + orow('Home', g.spread?.home?.line, g.spread?.home?.odds))}
+    ${ocol('Moneyline', orow('Away', null, g.moneyline?.away) + orow('Home', null, g.moneyline?.home))}
+    ${ocol('Total', orow('Over', g.total?.over?.line, g.total?.over?.odds) + orow('Under', g.total?.under?.line, g.total?.under?.odds))}
+  </div>
+</div>`;
+  }).join('');
+}
+
+function renderProps(data) {
+  const el = document.getElementById('props-wrap');
+  if (!data?.props) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">&#128202;</div>Player props unavailable &mdash; data source not active.</div>';
+    return;
+  }
+  if (!data.props.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">&#128202;</div>No player props available right now.</div>';
+    return;
+  }
+  const byGame = {};
+  for (const p of data.props) {
+    const g = p.matchup || 'Unknown', s = p.stat_type || 'Other';
+    ((byGame[g] = byGame[g] || {})[s] = byGame[g]?.[s] || []).push(p);
+  }
+  el.innerHTML = Object.entries(byGame).map(([game, stats]) =>
+    `<div class="props-game">
+  <div class="props-game-title">${game}</div>
+  ${Object.entries(stats).map(([stat, players]) =>
+    `<div class="props-stat">
+  <div class="props-stat-lbl">${stat}</div>
+  <div class="props-tbl">
+    ${players.map(p => `<div class="prow">
+      <span class="pname">${p.player}</span>
+      <span class="pline">${p.line ?? '&mdash;'}</span>
+      <span class="oval pos">${p.over_odds != null ? fmtOdds(p.over_odds) : '&mdash;'}<span class="plbl">O</span></span>
+      <span class="oval neg">${p.under_odds != null ? fmtOdds(p.under_odds) : '&mdash;'}<span class="plbl">U</span></span>
+    </div>`).join('')}
+  </div>
+</div>`).join('')}
+</div>`).join('');
+}
+
+function renderKalshi(data) {
+  const el = document.getElementById('k-grid');
+  if (!data?.markets) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">&#128200;</div>Kalshi data unavailable.</div>';
+    return;
+  }
+  const mkts = [...data.markets].sort((a, b) => parseFloat(b.yes_ask || 0) - parseFloat(a.yes_ask || 0));
+  el.innerHTML = mkts.map(m => {
+    const y = pct(m.yes_ask), n = pct(m.no_ask);
+    return `<div class="k-card">
+  <div class="k-team">${m.yes_team || m.ticker}</div>
+  <div>
+    <div class="k-pct">${y}<sup>&cent;</sup></div>
+    <div class="bar-track"><div class="bar-fill" style="width:${Math.min(y, 100)}%"></div></div>
+  </div>
+  <div class="k-stats">
+    <div class="k-stat"><div class="k-slbl">Yes Ask</div><div class="k-sval pos">${y}&cent;</div></div>
+    <div class="k-stat"><div class="k-slbl">No Ask</div><div class="k-sval neg">${n}&cent;</div></div>
+    <div class="k-stat k-stat-full"><div class="k-slbl">Volume</div><div class="k-sval">${fmtVol(m.volume)}</div></div>
+  </div>
+</div>`;
+  }).join('');
+}
+
+async function fetchAll() {
+  const [gl, props, kalshi] = await Promise.allSettled([
+    get('/odds/nba'),
+    get('/odds/nba/props'),
+    get('/odds/nba/kalshi'),
+  ]);
+  renderGL(gl.status === 'fulfilled' ? gl.value : null);
+  renderProps(props.status === 'fulfilled' ? props.value : null);
+  renderKalshi(kalshi.status === 'fulfilled' ? kalshi.value : null);
+  lastFetch = Date.now();
+}
+
+setInterval(() => {
+  if (!lastFetch) return;
+  const s = Math.floor((Date.now() - lastFetch) / 1000);
+  document.getElementById('ts').textContent = 'Updated ' + s + 's ago';
+}, 1000);
+
+setInterval(fetchAll, 60_000);
+fetchAll();
+</script>
+</body>
+</html>"""
 
 
 _LANDING_HTML = """<!DOCTYPE html>
