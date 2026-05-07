@@ -62,6 +62,10 @@ async def _fetch_games(client: httpx.AsyncClient) -> list[dict]:
         params = {"pageSize": 100, "ascending": "false", "include": "teamGameBasicStats"}
         rows = await _fetch_paginated(client, "/api/games", params)
         print(f"  games: {len(rows)} rows")
+        if rows:
+            first = rows[0]
+            print(f"  games[0] keys: {list(first.keys())}")
+            print(f"  games[0] sample: {json.dumps(first, default=str)[:500]}")
         return rows
     except Exception as exc:
         print(f"  WARN games endpoint failed: {exc}")
@@ -121,57 +125,70 @@ def _parse_advanced_stats(rows: list[dict]) -> list[dict]:
 
 def _parse_team_stats_from_games(games: list[dict]) -> tuple[list[dict], list[dict]]:
     acc: dict[str, dict] = {}
+    skip_no_score = 0
+    skip_no_entries = 0
+    parsed = 0
 
     for g in games:
-        date = (g.get("date") or g.get("gameDate") or "")[:10]
+        try:
+            date = (g.get("date") or g.get("gameDate") or "")[:10]
 
-        # Layout A: teamGameBasicStats list
-        stats = g.get("teamGameBasicStats")
-        if isinstance(stats, list) and len(stats) == 2:
-            entries = []
-            for s in stats:
-                entries.append({
-                    "abbr": s.get("team") or s.get("teamAbbreviation") or s.get("abbreviation", "?"),
-                    "name": s.get("teamName") or s.get("name", ""),
-                    "pts": s.get("points") or s.get("pts") or s.get("score"),
-                    "is_home": s.get("isHome", False),
-                })
-        else:
-            # Layout B: flat home/away fields
-            ht = g.get("homeTeam") or {}
-            at = g.get("awayTeam") or g.get("visitorTeam") or {}
-            hs = g.get("homeScore") or g.get("home_score") or ht.get("points")
-            as_ = g.get("awayScore") or g.get("away_score") or g.get("visitorScore") or at.get("points")
-            if not hs or not as_:
+            # Layout A: teamGameBasicStats list
+            stats = g.get("teamGameBasicStats")
+            if isinstance(stats, list) and len(stats) == 2:
+                entries = []
+                for s in stats:
+                    entries.append({
+                        "abbr": s.get("team") or s.get("teamAbbreviation") or s.get("abbreviation", "?"),
+                        "name": s.get("teamName") or s.get("name", ""),
+                        "pts": s.get("points") or s.get("pts") or s.get("score"),
+                        "is_home": s.get("isHome", False),
+                    })
+            else:
+                # Layout B: flat home/away fields
+                ht = g.get("homeTeam") or {}
+                at = g.get("awayTeam") or g.get("visitorTeam") or {}
+                hs = g.get("homeScore") or g.get("home_score") or ht.get("points")
+                as_ = g.get("awayScore") or g.get("away_score") or g.get("visitorScore") or at.get("points")
+                if not hs or not as_:
+                    skip_no_score += 1
+                    continue
+                entries = [
+                    {"abbr": ht.get("abbreviation") or ht.get("team", "?"), "name": ht.get("fullName") or ht.get("name", ""), "pts": hs, "is_home": True},
+                    {"abbr": at.get("abbreviation") or at.get("team", "?"), "name": at.get("fullName") or at.get("name", ""), "pts": as_, "is_home": False},
+                ]
+
+            if len(entries) < 2:
+                skip_no_entries += 1
                 continue
-            entries = [
-                {"abbr": ht.get("abbreviation") or ht.get("team", "?"), "name": ht.get("fullName") or ht.get("name", ""), "pts": hs, "is_home": True},
-                {"abbr": at.get("abbreviation") or at.get("team", "?"), "name": at.get("fullName") or at.get("name", ""), "pts": as_, "is_home": False},
-            ]
+            home = next((e for e in entries if e.get("is_home")), entries[0])
+            away = next((e for e in entries if not e.get("is_home")), entries[1])
+            if not home["pts"] or not away["pts"]:
+                skip_no_score += 1
+                continue
 
-        if len(entries) < 2:
-            continue
-        home = next((e for e in entries if e.get("is_home")), entries[0])
-        away = next((e for e in entries if not e.get("is_home")), entries[1])
-        if not home["pts"] or not away["pts"]:
-            continue
+            for entry, opp in ((home, away), (away, home)):
+                abbr = entry["abbr"]
+                if abbr not in acc:
+                    acc[abbr] = {"team_name": entry["name"], "wins": 0, "losses": 0,
+                                 "pts_for": [], "pts_against": [], "games": []}
+                won = int(entry["pts"]) > int(opp["pts"])
+                acc[abbr]["wins" if won else "losses"] += 1
+                acc[abbr]["pts_for"].append(int(entry["pts"]))
+                acc[abbr]["pts_against"].append(int(opp["pts"]))
+                acc[abbr]["games"].append({
+                    "date": date,
+                    "matchup": f"{entry['abbr']} vs {opp['abbr']}",
+                    "wl": "W" if won else "L",
+                    "pts": int(entry["pts"]),
+                    "opp_pts": int(opp["pts"]),
+                })
+            parsed += 1
 
-        for entry, opp in ((home, away), (away, home)):
-            abbr = entry["abbr"]
-            if abbr not in acc:
-                acc[abbr] = {"team_name": entry["name"], "wins": 0, "losses": 0,
-                             "pts_for": [], "pts_against": [], "games": []}
-            won = int(entry["pts"]) > int(opp["pts"])
-            acc[abbr]["wins" if won else "losses"] += 1
-            acc[abbr]["pts_for"].append(int(entry["pts"]))
-            acc[abbr]["pts_against"].append(int(opp["pts"]))
-            acc[abbr]["games"].append({
-                "date": date,
-                "matchup": f"{entry['abbr']} vs {opp['abbr']}",
-                "wl": "W" if won else "L",
-                "pts": int(entry["pts"]),
-                "opp_pts": int(opp["pts"]),
-            })
+        except Exception as exc:
+            print(f"  ERROR parsing game: {exc} | game={json.dumps(g, default=str)[:300]}")
+
+    print(f"  game parsing: {parsed} parsed, {skip_no_score} skipped (no score), {skip_no_entries} skipped (no entries), {len(acc)} teams found")
 
     teams_out, recent_out = [], []
     for abbr, a in acc.items():
@@ -198,7 +215,11 @@ def _parse_team_stats_from_games(games: list[dict]) -> tuple[list[dict], list[di
         })
 
     teams_out.sort(key=lambda t: t.get("win_pct") or 0, reverse=True)
-    print(f"  computed stats for {len(teams_out)} teams from games")
+    print(f"  teams calculated: {len(teams_out)}")
+    if teams_out:
+        print(f"  first team: {json.dumps(teams_out[0])}")
+    else:
+        print("  WARNING: 0 teams produced from game data — check game structure above")
     return teams_out, recent_out
 
 
@@ -249,6 +270,10 @@ async def fetch_nba_stats() -> dict:
 
     if games:
         teams, recent = _parse_team_stats_from_games(games)
+        if not teams:
+            print("  WARNING: games fetched but 0 teams parsed — falling back to player totals for team stats")
+            teams = _team_stats_from_players(players)
+            recent = []
     else:
         print("  using player totals fallback for team stats (no games data)")
         teams = _team_stats_from_players(players)
@@ -265,6 +290,11 @@ async def fetch_nba_stats() -> dict:
 
 def save_stats(data: dict, timestamp: str) -> None:
     os.makedirs(STATS_DIR, exist_ok=True)
+    print(f"  save_stats: {len(data['teams'])} teams, {len(data['players'])} players, {len(data['players_adv'])} adv")
+    if data["teams"]:
+        print(f"  first team entry: {json.dumps(data['teams'][0])}")
+    else:
+        print("  ERROR: teams list is empty — team_stats.json will be written but predictor will skip it")
 
     with open(TEAM_STATS_OUTPUT, "w", encoding="utf-8") as f:
         json.dump(
