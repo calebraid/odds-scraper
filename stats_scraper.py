@@ -143,82 +143,63 @@ def _parse_advanced_stats(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _record(acc: dict, abbr: str, name: str, pts: int, opp_pts: int,
+            opp_abbr: str, date: str) -> None:
+    if abbr not in acc:
+        acc[abbr] = {"team_name": name or abbr, "wins": 0, "losses": 0,
+                     "pts_for": [], "pts_against": [], "games": []}
+    won = pts > opp_pts
+    acc[abbr]["wins" if won else "losses"] += 1
+    acc[abbr]["pts_for"].append(pts)
+    acc[abbr]["pts_against"].append(opp_pts)
+    acc[abbr]["games"].append({
+        "date": date,
+        "matchup": f"{abbr} vs {opp_abbr}",
+        "wl": "W" if won else "L",
+        "pts": pts,
+        "opp_pts": opp_pts,
+    })
+
+
 def _parse_team_stats_from_games(games: list[dict]) -> tuple[list[dict], list[dict]]:
     acc: dict[str, dict] = {}
-    skip_no_score = 0
-    skip_no_entries = 0
-    parsed = 0
+    parsed = skip_no_score = skip_no_teams = 0
 
     for g in games:
         try:
             if isinstance(g, str):
                 g = json.loads(g)
+
             date = (g.get("date") or g.get("gameDate") or "")[:10]
 
-            # Layout A: teamGameBasicStats list
-            team_stats_list = g.get("teamGameBasicStats", [])
-            if not isinstance(team_stats_list, list):
-                team_stats_list = []
-            # Deserialize any string items inside the list
-            team_stats_list = [
-                json.loads(s) if isinstance(s, str) else s
-                for s in team_stats_list
-                if isinstance(s, (str, dict))
-            ]
-            if len(team_stats_list) == 2:
-                entries = []
-                for s in team_stats_list:
-                    entries.append({
-                        "abbr": s.get("team") or s.get("teamAbbreviation") or s.get("abbreviation", "?"),
-                        "name": s.get("teamName") or s.get("name", ""),
-                        "pts": s.get("points") or s.get("pts") or s.get("score"),
-                        "is_home": s.get("isHome", False),
-                    })
-            else:
-                # Layout B: flat home/away fields
-                ht = g.get("homeTeam") or {}
-                at = g.get("awayTeam") or g.get("visitorTeam") or {}
-                hs = g.get("homeScore") or g.get("home_score") or ht.get("points")
-                as_ = g.get("awayScore") or g.get("away_score") or g.get("visitorScore") or at.get("points")
-                if not hs or not as_:
-                    skip_no_score += 1
-                    continue
-                entries = [
-                    {"abbr": ht.get("abbreviation") or ht.get("team", "?"), "name": ht.get("fullName") or ht.get("name", ""), "pts": hs, "is_home": True},
-                    {"abbr": at.get("abbreviation") or at.get("team", "?"), "name": at.get("fullName") or at.get("name", ""), "pts": as_, "is_home": False},
-                ]
+            # --- Primary: flat homePts / visitorPts fields (confirmed API shape) ---
+            home_abbr = g.get("homeTeam") or ""
+            away_abbr = g.get("visitorTeam") or g.get("awayTeam") or ""
+            home_pts  = g.get("homePts")  or g.get("homeScore")  or g.get("home_score")
+            away_pts  = g.get("visitorPts") or g.get("awayScore") or g.get("away_score")
 
-            if len(entries) < 2:
-                skip_no_entries += 1
+            # Convert to int if present
+            try:
+                home_pts = int(home_pts) if home_pts is not None else None
+                away_pts = int(away_pts) if away_pts is not None else None
+            except (TypeError, ValueError):
+                home_pts = away_pts = None
+
+            if not home_abbr or not away_abbr:
+                skip_no_teams += 1
                 continue
-            home = next((e for e in entries if e.get("is_home")), entries[0])
-            away = next((e for e in entries if not e.get("is_home")), entries[1])
-            if not home["pts"] or not away["pts"]:
+            if home_pts is None or away_pts is None or (home_pts == 0 and away_pts == 0):
                 skip_no_score += 1
                 continue
 
-            for entry, opp in ((home, away), (away, home)):
-                abbr = entry["abbr"]
-                if abbr not in acc:
-                    acc[abbr] = {"team_name": entry["name"], "wins": 0, "losses": 0,
-                                 "pts_for": [], "pts_against": [], "games": []}
-                won = int(entry["pts"]) > int(opp["pts"])
-                acc[abbr]["wins" if won else "losses"] += 1
-                acc[abbr]["pts_for"].append(int(entry["pts"]))
-                acc[abbr]["pts_against"].append(int(opp["pts"]))
-                acc[abbr]["games"].append({
-                    "date": date,
-                    "matchup": f"{entry['abbr']} vs {opp['abbr']}",
-                    "wl": "W" if won else "L",
-                    "pts": int(entry["pts"]),
-                    "opp_pts": int(opp["pts"]),
-                })
+            _record(acc, home_abbr, home_abbr, home_pts, away_pts, away_abbr, date)
+            _record(acc, away_abbr, away_abbr, away_pts, home_pts, home_abbr, date)
             parsed += 1
 
         except Exception as exc:
             print(f"  ERROR parsing game: {exc} | game={json.dumps(g, default=str)[:300]}")
 
-    print(f"  game parsing: {parsed} parsed, {skip_no_score} skipped (no score), {skip_no_entries} skipped (no entries), {len(acc)} teams found")
+    print(f"  game parsing: {parsed} parsed, {skip_no_score} no-score, {skip_no_teams} no-teams, {len(acc)} teams")
 
     teams_out, recent_out = [], []
     for abbr, a in acc.items():
