@@ -156,10 +156,18 @@ def _parse_team_stats_from_games(games: list[dict]) -> tuple[list[dict], list[di
             date = (g.get("date") or g.get("gameDate") or "")[:10]
 
             # Layout A: teamGameBasicStats list
-            stats = g.get("teamGameBasicStats")
-            if isinstance(stats, list) and len(stats) == 2:
+            team_stats_list = g.get("teamGameBasicStats", [])
+            if not isinstance(team_stats_list, list):
+                team_stats_list = []
+            # Deserialize any string items inside the list
+            team_stats_list = [
+                json.loads(s) if isinstance(s, str) else s
+                for s in team_stats_list
+                if isinstance(s, (str, dict))
+            ]
+            if len(team_stats_list) == 2:
                 entries = []
-                for s in stats:
+                for s in team_stats_list:
                     entries.append({
                         "abbr": s.get("team") or s.get("teamAbbreviation") or s.get("abbreviation", "?"),
                         "name": s.get("teamName") or s.get("name", ""),
@@ -347,6 +355,7 @@ def save_stats(data: dict, timestamp: str) -> None:
         json.dump({"scraped_at": timestamp, "teams": data["recent"]}, f, indent=2)
 
     print(f"  saved {len(data['teams'])} teams | {len(data['players'])} players | {len(data['players_adv'])} adv")
+    print(f"  team_stats.json written: {len(data['teams'])} teams -> {TEAM_STATS_OUTPUT}")
 
 
 async def main():
