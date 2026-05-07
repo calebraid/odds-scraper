@@ -30,6 +30,13 @@ GAME_SERIES = {
     "KXNBAA": "winner",
     "KXNBAT": "total",
     "KXNBAS": "spread",
+    "KXNBATEAMTOTAL": "team_total",
+    "KXNBASERIESSPREAD": "series_spread",
+    "KXNBA2HWINNER": "2h_winner",
+    "KXNBARA": "reb_assists",
+    "KXNBABLK": "blocks",
+    "KXNBASTL": "steals",
+    "KXNBA3D": "triple_double",
 }
 
 

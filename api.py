@@ -244,6 +244,21 @@ main{max-width:1400px;margin:0 auto;padding:2.5rem 2rem 5rem;display:flex;flex-d
 .k-stats{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
 .k-stat{background:rgba(255,255,255,.03);border-radius:8px;padding:.5rem .625rem}
 .k-stat-full{grid-column:1/-1}
+.k-mrows{padding:.125rem 0}
+.k-mrow{display:grid;grid-template-columns:100px 1fr 1fr;gap:.5rem;padding:.35rem .75rem;align-items:center;font-size:.82rem}
+.k-mrow+.k-mrow{border-top:1px solid rgba(255,255,255,.04)}
+.k-mlbl{font-size:.63rem;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--gold);opacity:.75}
+.k-mside{display:flex;align-items:center;gap:.35rem}
+.k-msublbl{font-size:.7rem;color:var(--dim);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kprop-grid{display:flex;flex-direction:column;gap:.75rem}
+.kprop-group{background:rgba(17,17,17,.9);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.kprop-ghdr{padding:.6rem 1rem;background:rgba(255,215,0,.05);border-bottom:1px solid var(--border);font-size:.68rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold)}
+.kprop-row{display:grid;grid-template-columns:1fr auto auto;gap:1rem;padding:.55rem 1rem;align-items:center;font-size:.82rem;transition:background .15s}
+.kprop-row:hover{background:rgba(255,215,0,.03)}
+.kprop-row+.kprop-row{border-top:1px solid rgba(255,255,255,.04)}
+.kprop-title{font-weight:500;line-height:1.3}
+.kprop-price{display:flex;align-items:center;gap:.3rem;font-family:'JetBrains Mono',monospace}
+.kprop-lbl{font-size:.65rem;color:var(--dim)}
 .subsec-hdr{font-size:.7rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--gold);opacity:.7;margin-bottom:.75rem}
 .k-slbl{font-size:.6rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);margin-bottom:.2rem}
 .k-sval{font-size:.85rem;font-weight:700;font-family:'JetBrains Mono',monospace}
@@ -304,6 +319,10 @@ main{max-width:1400px;margin:0 auto;padding:2.5rem 2rem 5rem;display:flex;flex-d
     <div class="subsec-hdr">Game Lines</div>
     <div class="cards-grid" id="k-game-grid" style="margin-bottom:2rem">
       <div class="loading"><div class="spinner"></div>Loading game markets&hellip;</div>
+    </div>
+    <div class="subsec-hdr">Player Props</div>
+    <div id="k-props-wrap" style="margin-bottom:2rem">
+      <div class="loading"><div class="spinner"></div>Loading player props&hellip;</div>
     </div>
     <div class="subsec-hdr">NBA Finals Futures</div>
     <div class="kalshi-grid" id="k-grid">
@@ -396,36 +415,62 @@ function renderProps(data) {
 </div>`).join('');
 }
 
+const GAME_MTYPES = {winner:'Winner', total:'Total', spread:'Spread', team_total:'Team Total', series_spread:'Series Spread', '2h_winner':'2H Winner'};
+const PROP_MTYPES  = {reb_assists:'Reb + Assists', blocks:'Blocks', steals:'Steals', triple_double:'Triple Double'};
+
 function renderKalshiGames(gameMarkets) {
   const el = document.getElementById('k-game-grid');
-  if (!gameMarkets?.length) {
+  const gmkts = (gameMarkets || []).filter(m => GAME_MTYPES[m.market_type]);
+  if (!gmkts.length) {
     el.innerHTML = '<div class="empty"><div class="empty-icon">&#127936;</div>No game markets available right now.</div>';
     return;
   }
   const byEvent = {};
-  for (const m of gameMarkets) {
+  for (const m of gmkts) {
     (byEvent[m.event_ticker] = byEvent[m.event_ticker] || {})[m.market_type] = m;
   }
-  const prow = (m, yLbl, nLbl) => m
-    ? `<div class="orow"><span class="side">${yLbl}</span><span class="oval pos">${pct(m.yes_ask)}&cent;</span></div>
-       <div class="orow"><span class="side">${nLbl}</span><span class="oval neg">${pct(m.no_ask)}&cent;</span></div>`
-    : `<div class="orow"><span class="side" style="color:#333">N/A</span></div>`;
   el.innerHTML = Object.values(byEvent).map(ev => {
-    const w = ev.winner, t = ev.total, s = ev.spread;
-    const ct = w?.close_time || t?.close_time || s?.close_time;
+    const ref = ev.winner || Object.values(ev)[0];
+    const ct = ref?.close_time;
     const ctStr = ct ? new Date(ct).toLocaleString('en-US', {timeZone:'America/New_York', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : '';
+    const rows = Object.keys(GAME_MTYPES).filter(t => ev[t]).map(t => {
+      const m = ev[t];
+      return `<div class="k-mrow">
+  <span class="k-mlbl">${GAME_MTYPES[t]}</span>
+  <span class="k-mside">${m.yes_team ? `<span class="k-msublbl">${m.yes_team}</span>` : ''}<span class="oval pos">${pct(m.yes_ask)}&cent;</span></span>
+  <span class="k-mside">${m.no_team ? `<span class="k-msublbl">${m.no_team}</span>` : ''}<span class="oval neg">${pct(m.no_ask)}&cent;</span></span>
+</div>`;
+    }).join('');
     return `<div class="game-card">
   <div class="game-card-hdr">
-    <span class="matchup">${w?.yes_team || '?'} vs ${w?.no_team || '?'}</span>
+    <span class="matchup">${ev.winner?.yes_team || ref?.yes_team || '?'} vs ${ev.winner?.no_team || ref?.no_team || '?'}</span>
     ${ctStr ? `<span class="g-badge b-up">${ctStr} ET</span>` : ''}
   </div>
-  <div class="odds-cols">
-    <div><div class="ocol-lbl">Winner</div>${prow(w, w?.yes_team || 'Yes', w?.no_team || 'No')}</div>
-    <div><div class="ocol-lbl">Total</div>${prow(t, t?.yes_team || 'Over', t?.no_team || 'Under')}</div>
-    <div><div class="ocol-lbl">Spread</div>${prow(s, s?.yes_team || 'Yes', s?.no_team || 'No')}</div>
-  </div>
+  <div class="k-mrows">${rows}</div>
 </div>`;
   }).join('');
+}
+
+function renderKalshiProps(gameMarkets) {
+  const el = document.getElementById('k-props-wrap');
+  const pmkts = (gameMarkets || []).filter(m => PROP_MTYPES[m.market_type]);
+  if (!pmkts.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">&#128202;</div>No player prop markets available right now.</div>';
+    return;
+  }
+  const byType = {};
+  for (const m of pmkts) {
+    (byType[m.market_type] = byType[m.market_type] || []).push(m);
+  }
+  el.innerHTML = `<div class="kprop-grid">${Object.entries(byType).map(([type, mkts]) =>
+    `<div class="kprop-group">
+  <div class="kprop-ghdr">${PROP_MTYPES[type]}</div>
+  ${mkts.map(m => `<div class="kprop-row">
+  <span class="kprop-title">${m.title || m.ticker}</span>
+  <span class="kprop-price"><span class="kprop-lbl">Yes</span><span class="oval pos">${pct(m.yes_ask)}&cent;</span></span>
+  <span class="kprop-price"><span class="kprop-lbl">No</span><span class="oval neg">${pct(m.no_ask)}&cent;</span></span>
+</div>`).join('')}
+</div>`).join('')}</div>`;
 }
 
 function renderKalshiFutures(futures) {
@@ -462,6 +507,7 @@ async function fetchAll() {
   renderProps(props.status === 'fulfilled' ? props.value : null);
   const kd = kalshi.status === 'fulfilled' ? kalshi.value : null;
   renderKalshiGames(kd?.game_markets ?? null);
+  renderKalshiProps(kd?.game_markets ?? null);
   renderKalshiFutures(kd?.futures ?? null);
   lastFetch = Date.now();
 }
