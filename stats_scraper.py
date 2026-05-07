@@ -8,185 +8,179 @@ import httpx
 STATS_DIR = "stats"
 TEAM_STATS_OUTPUT = os.path.join(STATS_DIR, "team_stats.json")
 PLAYER_STATS_OUTPUT = os.path.join(STATS_DIR, "player_stats.json")
+PLAYER_ADV_OUTPUT = os.path.join(STATS_DIR, "player_stats_advanced.json")
 RECENT_GAMES_OUTPUT = os.path.join(STATS_DIR, "recent_games.json")
 
-BASE_URL = "https://nba-go-api.onrender.com"
+BASE_URL = "https://api.server.nbaapi.com"
 SEASON = 2025  # 2025-26 NBA season
 
 
-def _get(*keys, obj, default=None):
-    """Return first matching key from obj."""
-    for k in keys:
-        if k in obj:
-            return obj[k]
-    return default
-
-
-def _rows(data: dict, *keys) -> list[dict]:
-    """Extract list from response trying multiple root keys."""
-    for k in keys:
-        v = data.get(k)
-        if isinstance(v, list):
-            return v
+def _extract_list(data) -> list[dict]:
+    """Return list regardless of whether response is bare array or wrapped object."""
+    if isinstance(data, list):
+        return data
+    for key in ("data", "results", "players", "games", "items"):
+        if isinstance(data.get(key), list):
+            return data[key]
     return []
 
 
 async def _fetch_paginated(client: httpx.AsyncClient, path: str, params: dict) -> list[dict]:
     results: list[dict] = []
     page = 1
+    page_size = int(params.get("pageSize", 100))
     while True:
-        p = {**params, "page": page}
-        r = await client.get(f"{BASE_URL}{path}", params=p, timeout=30)
+        r = await client.get(f"{BASE_URL}{path}", params={**params, "page": page}, timeout=30)
         r.raise_for_status()
-        data = r.json()
-
-        chunk = _rows(data, "data", "games", "playerTotals", "players", "results")
-        if not chunk:
-            break
+        chunk = _extract_list(r.json())
         results.extend(chunk)
-
-        # Stop when we've received fewer items than pageSize (last page)
-        page_size = params.get("pageSize", 100)
         if len(chunk) < page_size:
             break
         page += 1
-
     return results
 
 
+async def _fetch_player_totals(client: httpx.AsyncClient, playoff: bool = False) -> list[dict]:
+    params = {"season": SEASON, "pageSize": 100, "sortBy": "points", "ascending": "false"}
+    if playoff:
+        params["isPlayoff"] = "true"
+    rows = await _fetch_paginated(client, "/api/playertotals", params)
+    label = "playoff" if playoff else "regular"
+    print(f"  playertotals ({label}): {len(rows)} rows")
+    return rows
+
+
+async def _fetch_advanced(client: httpx.AsyncClient) -> list[dict]:
+    params = {"season": SEASON, "pageSize": 100, "sortBy": "win_shares", "ascending": "false"}
+    rows = await _fetch_paginated(client, "/api/playeradvancedstats", params)
+    print(f"  playeradvancedstats: {len(rows)} rows")
+    return rows
+
+
 async def _fetch_games(client: httpx.AsyncClient) -> list[dict]:
-    games = await _fetch_paginated(
-        client,
-        "/api/games",
-        {"pageSize": 100, "ascending": "false", "include": "teamGameBasicStats"},
-    )
-    print(f"  fetched {len(games)} games")
-    return games
+    try:
+        params = {"pageSize": 100, "ascending": "false", "include": "teamGameBasicStats"}
+        rows = await _fetch_paginated(client, "/api/games", params)
+        print(f"  games: {len(rows)} rows")
+        return rows
+    except Exception as exc:
+        print(f"  WARN games endpoint failed: {exc}")
+        return []
 
 
-async def _fetch_player_totals(client: httpx.AsyncClient) -> list[dict]:
-    totals = await _fetch_paginated(
-        client,
-        "/api/playertotals",
-        {"season": SEASON, "pageSize": 100, "sortBy": "points"},
-    )
-    print(f"  fetched {len(totals)} player total rows")
-    return totals
+# ── parsers ───────────────────────────────────────────────────────────────────
+
+def _parse_player_stats(totals: list[dict]) -> list[dict]:
+    players = []
+    for row in totals:
+        gp = row.get("games")
+        if not gp:
+            continue
+        gp = int(gp)
+
+        def pg(field, already_rate=False):
+            v = row.get(field)
+            if v is None:
+                return None
+            return round(float(v) if already_rate else float(v) / gp, 1)
+
+        players.append({
+            "player_name": row.get("playerName", "Unknown"),
+            "team": row.get("team", ""),
+            "games_played": gp,
+            "ppg":  pg("points"),
+            "apg":  pg("assists"),
+            "rpg":  pg("totalRb"),
+            "spg":  pg("steals"),
+            "bpg":  pg("blocks"),
+            "mpg":  row.get("minutesPg"),        # already per game
+            "fg_pct":  row.get("fieldPercent"),  # already a rate
+            "three_pct": row.get("threePercent"),
+        })
+
+    players.sort(key=lambda p: p.get("ppg") or 0, reverse=True)
+    return players
 
 
-def _parse_game_teams(game: dict) -> tuple[dict, dict] | None:
-    """
-    Return (home_entry, away_entry) as dicts with keys:
-    team_id, team_name, team_abbr, pts, opp_pts, is_home.
-
-    Handles two layouts:
-    A) game has teamGameBasicStats list of 2 items
-    B) game has flat homeTeam/awayTeam sub-objects with score at top level
-    """
-    stats = game.get("teamGameBasicStats")
-    if isinstance(stats, list) and len(stats) == 2:
-        entries = []
-        for s in stats:
-            entries.append({
-                "team_id": str(_get("teamId", "team_id", "id", obj=s, default="")),
-                "team_name": _get("teamName", "team_name", "name", obj=s, default=""),
-                "team_abbr": _get("teamAbbreviation", "team_abbr", "abbreviation", obj=s, default="?"),
-                "pts": _get("points", "pts", "score", obj=s),
-                "is_home": _get("isHome", "is_home", obj=s, default=False),
-            })
-        # Identify home / away
-        home = next((e for e in entries if e["is_home"]), entries[0])
-        away = next((e for e in entries if not e["is_home"]), entries[1])
-        if home["pts"] is None or away["pts"] is None:
-            return None
-        home["opp_pts"] = away["pts"]
-        away["opp_pts"] = home["pts"]
-        return home, away
-
-    # Flat layout: homeTeam / awayTeam sub-objects + top-level scores
-    ht = game.get("homeTeam") or {}
-    at = game.get("awayTeam") or game.get("visitorTeam") or {}
-    hs = _get("homeScore", "home_score", "homePoints", obj=game) or _get("points", "score", obj=ht)
-    as_ = _get("awayScore", "away_score", "visitorScore", "awayPoints", obj=game) or _get("points", "score", obj=at)
-
-    if hs is None or as_ is None:
-        return None
-
-    home = {
-        "team_id": str(_get("id", "teamId", "team_id", obj=ht, default="")),
-        "team_name": _get("fullName", "full_name", "teamName", "name", obj=ht, default=""),
-        "team_abbr": _get("abbreviation", "teamAbbreviation", "abbr", obj=ht, default="?"),
-        "pts": hs,
-        "opp_pts": as_,
-        "is_home": True,
-    }
-    away = {
-        "team_id": str(_get("id", "teamId", "team_id", obj=at, default="")),
-        "team_name": _get("fullName", "full_name", "teamName", "name", obj=at, default=""),
-        "team_abbr": _get("abbreviation", "teamAbbreviation", "abbr", obj=at, default="?"),
-        "pts": as_,
-        "opp_pts": hs,
-        "is_home": False,
-    }
-    return home, away
+def _parse_advanced_stats(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        out.append({
+            "player_name": row.get("playerName", "Unknown"),
+            "team": row.get("team", ""),
+            "games_played": row.get("games"),
+            "per": row.get("per"),
+            "usage_pct": row.get("usagePercent"),
+            "win_shares": row.get("winShares"),
+            "bpm": row.get("box"),
+            "vorp": row.get("vorp"),
+            "ts_pct": row.get("tsPercent"),
+        })
+    return out
 
 
-def _compute_team_stats(games: list[dict]) -> tuple[list[dict], list[dict]]:
-    # keyed by team_id string; store accumulated data
+def _parse_team_stats_from_games(games: list[dict]) -> tuple[list[dict], list[dict]]:
     acc: dict[str, dict] = {}
 
-    # Games arrive newest-first (ascending=false)
     for g in games:
-        date = (_get("date", "gameDate", "game_date", obj=g) or "")[:10]
-        parsed = _parse_game_teams(g)
-        if parsed is None:
-            continue
-        home, away = parsed
+        date = (g.get("date") or g.get("gameDate") or "")[:10]
 
-        for entry in (home, away):
-            tid = entry["team_id"] or entry["team_abbr"]
-            if not tid:
+        # Layout A: teamGameBasicStats list
+        stats = g.get("teamGameBasicStats")
+        if isinstance(stats, list) and len(stats) == 2:
+            entries = []
+            for s in stats:
+                entries.append({
+                    "abbr": s.get("team") or s.get("teamAbbreviation") or s.get("abbreviation", "?"),
+                    "name": s.get("teamName") or s.get("name", ""),
+                    "pts": s.get("points") or s.get("pts") or s.get("score"),
+                    "is_home": s.get("isHome", False),
+                })
+        else:
+            # Layout B: flat home/away fields
+            ht = g.get("homeTeam") or {}
+            at = g.get("awayTeam") or g.get("visitorTeam") or {}
+            hs = g.get("homeScore") or g.get("home_score") or ht.get("points")
+            as_ = g.get("awayScore") or g.get("away_score") or g.get("visitorScore") or at.get("points")
+            if not hs or not as_:
                 continue
-            if tid not in acc:
-                acc[tid] = {
-                    "team_id": tid,
-                    "team_name": entry["team_name"],
-                    "team_abbr": entry["team_abbr"],
-                    "wins": 0,
-                    "losses": 0,
-                    "pts_for": [],
-                    "pts_against": [],
-                    "games": [],
-                }
-            a = acc[tid]
-            won = entry["pts"] > entry["opp_pts"]
-            if won:
-                a["wins"] += 1
-            else:
-                a["losses"] += 1
-            a["pts_for"].append(entry["pts"])
-            a["pts_against"].append(entry["opp_pts"])
-            opp_abbr = away["team_abbr"] if entry["is_home"] else home["team_abbr"]
-            a["games"].append({
+            entries = [
+                {"abbr": ht.get("abbreviation") or ht.get("team", "?"), "name": ht.get("fullName") or ht.get("name", ""), "pts": hs, "is_home": True},
+                {"abbr": at.get("abbreviation") or at.get("team", "?"), "name": at.get("fullName") or at.get("name", ""), "pts": as_, "is_home": False},
+            ]
+
+        if len(entries) < 2:
+            continue
+        home = next((e for e in entries if e.get("is_home")), entries[0])
+        away = next((e for e in entries if not e.get("is_home")), entries[1])
+        if not home["pts"] or not away["pts"]:
+            continue
+
+        for entry, opp in ((home, away), (away, home)):
+            abbr = entry["abbr"]
+            if abbr not in acc:
+                acc[abbr] = {"team_name": entry["name"], "wins": 0, "losses": 0,
+                             "pts_for": [], "pts_against": [], "games": []}
+            won = int(entry["pts"]) > int(opp["pts"])
+            acc[abbr]["wins" if won else "losses"] += 1
+            acc[abbr]["pts_for"].append(int(entry["pts"]))
+            acc[abbr]["pts_against"].append(int(opp["pts"]))
+            acc[abbr]["games"].append({
                 "date": date,
-                "matchup": f"{entry['team_abbr']} vs {opp_abbr}",
+                "matchup": f"{entry['abbr']} vs {opp['abbr']}",
                 "wl": "W" if won else "L",
-                "pts": entry["pts"],
-                "opp_pts": entry["opp_pts"],
+                "pts": int(entry["pts"]),
+                "opp_pts": int(opp["pts"]),
             })
 
-    teams_out: list[dict] = []
-    recent_out: list[dict] = []
-
-    for a in acc.values():
+    teams_out, recent_out = [], []
+    for abbr, a in acc.items():
         total = a["wins"] + a["losses"]
         win_pct = round(a["wins"] / total, 3) if total else None
         ppg = round(sum(a["pts_for"]) / len(a["pts_for"]), 1) if a["pts_for"] else None
         opp_ppg = round(sum(a["pts_against"]) / len(a["pts_against"]), 1) if a["pts_against"] else None
-        net = round(ppg - opp_ppg, 1) if (ppg and opp_ppg) else None
-
         teams_out.append({
-            "team_id": a["team_id"],
+            "team_id": abbr,
             "team_name": a["team_name"],
             "wins": a["wins"],
             "losses": a["losses"],
@@ -194,60 +188,79 @@ def _compute_team_stats(games: list[dict]) -> tuple[list[dict], list[dict]]:
             "ppg": ppg,
             "off_rtg": ppg,
             "def_rtg": opp_ppg,
-            "net_rtg": net,
+            "net_rtg": round(ppg - opp_ppg, 1) if (ppg and opp_ppg) else None,
             "pace": None,
         })
-
         recent_out.append({
-            "team_id": a["team_id"],
+            "team_id": abbr,
             "team_name": a["team_name"],
-            "games": a["games"][:30],  # last 30 stored, features.py uses 10
+            "games": a["games"][:30],
         })
 
     teams_out.sort(key=lambda t: t.get("win_pct") or 0, reverse=True)
-    print(f"  computed stats for {len(teams_out)} teams")
+    print(f"  computed stats for {len(teams_out)} teams from games")
     return teams_out, recent_out
 
 
-def _compute_player_stats(totals: list[dict]) -> list[dict]:
-    players: list[dict] = []
-    for row in totals:
-        gp = _get("gamesPlayed", "games_played", "gp", "games", obj=row)
-        if not gp:
+def _team_stats_from_players(players: list[dict]) -> list[dict]:
+    """Fallback: estimate team offensive stats by aggregating player totals."""
+    by_team: dict[str, dict] = {}
+    for p in players:
+        team = p.get("team", "")
+        if not team:
             continue
-        gp = int(gp)
+        if team not in by_team:
+            by_team[team] = {"ppg_sum": 0.0, "count": 0}
+        ppg = p.get("ppg") or 0
+        by_team[team]["ppg_sum"] += ppg
+        by_team[team]["count"] += 1
 
-        def pg(field, *alt):
-            raw = _get(field, *alt, obj=row)
-            if raw is None:
-                return None
-            return round(float(raw) / gp, 1)
-
-        players.append({
-            "player_name": _get("playerName", "player_name", "name", "fullName", obj=row, default="Unknown"),
-            "team": _get("teamAbbreviation", "team_abbr", "team", "teamAbbr", obj=row, default=""),
-            "games_played": gp,
-            "ppg": pg("points", "pts"),
-            "apg": pg("assists", "ast"),
-            "rpg": pg("totalRebounds", "rebounds", "reb", "total_rebounds"),
-            "spg": pg("steals", "stl"),
-            "bpg": pg("blocks", "blk"),
+    out = []
+    for abbr, d in by_team.items():
+        out.append({
+            "team_id": abbr,
+            "team_name": abbr,
+            "wins": None,
+            "losses": None,
+            "win_pct": None,
+            "ppg": round(d["ppg_sum"], 1),
+            "off_rtg": round(d["ppg_sum"], 1),
+            "def_rtg": None,
+            "net_rtg": None,
+            "pace": None,
         })
+    return out
 
-    players.sort(key=lambda p: p.get("ppg") or 0, reverse=True)
-    print(f"  computed per-game stats for {len(players)} players")
-    return players
 
+# ── main fetch/save ───────────────────────────────────────────────────────────
 
 async def fetch_nba_stats() -> dict:
     async with httpx.AsyncClient() as client:
-        games, totals = await asyncio.gather(
+        totals, adv, playoff_totals, games = await asyncio.gather(
+            _fetch_player_totals(client, playoff=False),
+            _fetch_advanced(client),
+            _fetch_player_totals(client, playoff=True),
             _fetch_games(client),
-            _fetch_player_totals(client),
         )
-    teams, recent = _compute_team_stats(games)
-    players = _compute_player_stats(totals)
-    return {"teams": teams, "recent": recent, "players": players}
+
+    players = _parse_player_stats(totals)
+    players_adv = _parse_advanced_stats(adv)
+    playoff_players = _parse_player_stats(playoff_totals)
+
+    if games:
+        teams, recent = _parse_team_stats_from_games(games)
+    else:
+        print("  using player totals fallback for team stats (no games data)")
+        teams = _team_stats_from_players(players)
+        recent = []
+
+    return {
+        "teams": teams,
+        "recent": recent,
+        "players": players,
+        "players_adv": players_adv,
+        "playoff_players": playoff_players,
+    }
 
 
 def save_stats(data: dict, timestamp: str) -> None:
@@ -261,22 +274,32 @@ def save_stats(data: dict, timestamp: str) -> None:
 
     with open(PLAYER_STATS_OUTPUT, "w", encoding="utf-8") as f:
         json.dump(
-            {"scraped_at": timestamp, "season": SEASON, "count": len(data["players"]), "players": data["players"]},
+            {
+                "scraped_at": timestamp,
+                "season": SEASON,
+                "count": len(data["players"]),
+                "players": data["players"],
+                "playoff_count": len(data["playoff_players"]),
+                "playoff_players": data["playoff_players"],
+            },
+            f, indent=2,
+        )
+
+    with open(PLAYER_ADV_OUTPUT, "w", encoding="utf-8") as f:
+        json.dump(
+            {"scraped_at": timestamp, "season": SEASON, "count": len(data["players_adv"]), "players": data["players_adv"]},
             f, indent=2,
         )
 
     with open(RECENT_GAMES_OUTPUT, "w", encoding="utf-8") as f:
-        json.dump(
-            {"scraped_at": timestamp, "teams": data["recent"]},
-            f, indent=2,
-        )
+        json.dump({"scraped_at": timestamp, "teams": data["recent"]}, f, indent=2)
 
-    print(f"  saved {len(data['teams'])} teams, {len(data['players'])} players")
+    print(f"  saved {len(data['teams'])} teams | {len(data['players'])} players | {len(data['players_adv'])} adv")
 
 
 async def main():
     interval = 3600
-    print(f"NBA Stats scraper (nba-go-api)  |  interval={interval}s")
+    print(f"NBA Stats scraper (nbaapi.com)  |  interval={interval}s")
     run = 0
     while True:
         run += 1
