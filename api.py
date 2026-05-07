@@ -11,6 +11,7 @@ app = FastAPI(title="Sports Odds API", version="2.0.0")
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 ODDS_DIR = os.path.join(_BASE, "odds")
+STATS_DIR = os.path.join(_BASE, "stats")
 
 RATE_LIMITS: dict[str, int] = {
     "free": 100,
@@ -71,6 +72,17 @@ def authenticate(raw_key: Annotated[str, Security(api_key_header)]) -> dict:
         )
 
     return {"tier": tier, "usage": count, "limit": limit}
+
+
+def load_stats(filename: str) -> dict:
+    path = os.path.join(STATS_DIR, filename)
+    if not os.path.exists(path):
+        raise HTTPException(
+            status_code=503,
+            detail="Stats data unavailable — scraper has not produced output yet.",
+        )
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def load_odds(filename: str) -> dict:
@@ -161,6 +173,22 @@ def get_nba_kalshi(auth: Annotated[dict, Depends(authenticate)], response: Respo
     return JSONResponse(content=result, headers=dict(response.headers))
 
 
+@app.get("/stats/players", summary="NBA player season per-game averages")
+def get_player_stats(auth: Annotated[dict, Depends(authenticate)], response: Response):
+    _set_rate_limit_headers(response, auth)
+    data = load_stats("player_stats.json")
+    warning = staleness_warning(data.get("scraped_at"))
+    result = {
+        "scraped_at": data.get("scraped_at"),
+        "season": data.get("season"),
+        "count": data.get("count", len(data.get("players", []))),
+        "players": data.get("players", []),
+    }
+    if warning:
+        result["warning"] = warning
+    return JSONResponse(content=result, headers=dict(response.headers))
+
+
 @app.get("/predictions", summary="Latest AI predictions for Kalshi markets")
 def get_predictions(auth: Annotated[dict, Depends(authenticate)], response: Response):
     _set_rate_limit_headers(response, auth)
@@ -180,7 +208,7 @@ def get_predictions(auth: Annotated[dict, Depends(authenticate)], response: Resp
 @app.get("/predictions/accuracy", summary="Prediction model accuracy stats")
 def get_predictions_accuracy(auth: Annotated[dict, Depends(authenticate)], response: Response):
     _set_rate_limit_headers(response, auth)
-    path = os.path.join(_BASE, "stats", "prediction_history.json")
+    path = os.path.join(STATS_DIR, "prediction_history.json")
     if not os.path.exists(path):
         return JSONResponse(
             content={"total_predictions": 0, "resolved_predictions": 0, "correct": 0, "accuracy_pct": None, "by_type": {}},
