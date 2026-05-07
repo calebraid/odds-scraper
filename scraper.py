@@ -28,7 +28,7 @@ async def scrape_kalshi_nba() -> list[dict]:
             resp = await client.get(
                 "https://trading-api.kalshi.com/trade-api/v2/markets",
                 params=params,
-                headers={"Authorization": KALSHI_API_KEY},
+                headers={"Authorization": f"Bearer {KALSHI_API_KEY}"},
             )
             resp.raise_for_status()
             data = resp.json()
