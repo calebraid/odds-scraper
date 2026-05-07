@@ -17,7 +17,6 @@ KALSHI_BASE = "https://api.elections.kalshi.com"
 _KEY_ID = os.environ.get("KALSHI_API_KEY", "")
 _KEY_PEM = os.environ.get("KALSHI_PRIVATE_KEY", "")
 
-# Normalize PEM in case the env var stores literal \n instead of real newlines
 if _KEY_PEM and "\\n" in _KEY_PEM:
     _KEY_PEM = _KEY_PEM.replace("\\n", "\n")
 
@@ -25,6 +24,13 @@ _private_key = (
     serialization.load_pem_private_key(_KEY_PEM.encode(), password=None)
     if _KEY_PEM else None
 )
+
+FUTURES_SERIES = "KXNBA"
+GAME_SERIES = {
+    "KXNBAA": "winner",
+    "KXNBAT": "total",
+    "KXNBAS": "spread",
+}
 
 
 def make_kalshi_headers(method: str, path: str) -> dict:
@@ -42,64 +48,98 @@ def make_kalshi_headers(method: str, path: str) -> dict:
     }
 
 
-async def scrape_kalshi_nba() -> list[dict]:
-    """Fetch all open KXNBA markets from Kalshi, handling cursor pagination."""
+async def fetch_series(client: httpx.AsyncClient, series_ticker: str) -> list[dict]:
+    """Fetch all open markets for one series, handling cursor pagination."""
+    markets: list[dict] = []
+    cursor: str | None = None
+    path = "/trade-api/v2/markets"
+
+    while True:
+        params: dict = {"status": "open", "series_ticker": series_ticker, "limit": 200}
+        if cursor:
+            params["cursor"] = cursor
+
+        resp = await client.get(
+            f"{KALSHI_BASE}{path}",
+            params=params,
+            headers=make_kalshi_headers("GET", path),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        markets.extend(data.get("markets") or [])
+
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+
+    return markets
+
+
+def parse_market(m: dict, market_type: str) -> dict:
+    return {
+        "ticker": m.get("ticker"),
+        "event_ticker": m.get("event_ticker"),
+        "market_type": market_type,
+        "title": m.get("title"),
+        "yes_team": m.get("yes_sub_title"),
+        "no_team": m.get("no_sub_title"),
+        "yes_bid": m.get("yes_bid_dollars"),
+        "yes_ask": m.get("yes_ask_dollars"),
+        "no_bid": m.get("no_bid_dollars"),
+        "no_ask": m.get("no_ask_dollars"),
+        "last_price": m.get("last_price_dollars"),
+        "close_time": m.get("close_time"),
+        "volume": m.get("volume_fp"),
+        "open_interest": m.get("open_interest_fp"),
+        "status": m.get("status"),
+    }
+
+
+async def scrape_kalshi_nba() -> dict:
+    """Fetch NBA futures (KXNBA) and game markets (KXNBAA/T/S) concurrently."""
     if not _private_key:
         raise RuntimeError("KALSHI_PRIVATE_KEY environment variable not set")
     if not _KEY_ID:
         raise RuntimeError("KALSHI_API_KEY environment variable not set")
 
-    markets: list[dict] = []
-    cursor: str | None = None
-    path = "/trade-api/v2/markets"
+    all_series = [FUTURES_SERIES] + list(GAME_SERIES.keys())
 
     async with httpx.AsyncClient(timeout=15) as client:
-        while True:
-            params: dict = {"status": "open", "series_ticker": "KXNBA", "limit": 200}
-            if cursor:
-                params["cursor"] = cursor
+        results = await asyncio.gather(
+            *[fetch_series(client, s) for s in all_series],
+            return_exceptions=True,
+        )
 
-            resp = await client.get(
-                f"{KALSHI_BASE}{path}",
-                params=params,
-                headers=make_kalshi_headers("GET", path),
-            )
-            resp.raise_for_status()
-            data = resp.json()
+    futures_raw, *game_raws = results
 
-            for m in (data.get("markets") or []):
-                markets.append({
-                    "ticker": m.get("ticker"),
-                    "event_ticker": m.get("event_ticker"),
-                    "title": m.get("title"),
-                    "yes_team": m.get("yes_sub_title"),
-                    "no_team": m.get("no_sub_title"),
-                    "yes_bid": m.get("yes_bid_dollars"),
-                    "yes_ask": m.get("yes_ask_dollars"),
-                    "no_bid": m.get("no_bid_dollars"),
-                    "no_ask": m.get("no_ask_dollars"),
-                    "last_price": m.get("last_price_dollars"),
-                    "volume": m.get("volume_fp"),
-                    "open_interest": m.get("open_interest_fp"),
-                    "rules": m.get("rules_primary"),
-                    "status": m.get("status"),
-                })
+    if isinstance(futures_raw, Exception):
+        print(f"  ERROR fetching {FUTURES_SERIES}: {futures_raw}")
+        futures = []
+    else:
+        futures = [parse_market(m, "futures") for m in futures_raw]
 
-            cursor = data.get("cursor")
-            if not cursor:
-                break
+    game_markets: list[dict] = []
+    for series_ticker, raw in zip(GAME_SERIES.keys(), game_raws):
+        mtype = GAME_SERIES[series_ticker]
+        if isinstance(raw, Exception):
+            print(f"  ERROR fetching {series_ticker} ({mtype}): {raw}")
+        else:
+            game_markets.extend(parse_market(m, mtype) for m in raw)
+            print(f"  {series_ticker} ({mtype}): {len(raw)} market(s)")
 
-    return markets
+    return {"futures": futures, "game_markets": game_markets}
 
 
-def save(markets: list[dict], timestamp: str) -> str:
+def save(data: dict, timestamp: str) -> str:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     payload = {
         "source": "Kalshi",
         "league": "NBA",
         "scraped_at": timestamp,
-        "count": len(markets),
-        "markets": markets,
+        "futures_count": len(data["futures"]),
+        "game_markets_count": len(data["game_markets"]),
+        "futures": data["futures"],
+        "game_markets": data["game_markets"],
     }
     with open(KALSHI_OUTPUT, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -114,9 +154,9 @@ async def main():
         ts = datetime.now(timezone.utc).isoformat()
         print(f"\n[{ts}] run #{run}")
         try:
-            markets = await scrape_kalshi_nba()
-            out = save(markets, ts)
-            print(f"  {len(markets)} market(s) -> {out}")
+            data = await scrape_kalshi_nba()
+            out = save(data, ts)
+            print(f"  {len(data['futures'])} futures, {len(data['game_markets'])} game markets -> {out}")
         except Exception as exc:
             print(f"  ERROR: {exc}")
         print(f"  sleeping {INTERVAL_SECONDS}s ...")

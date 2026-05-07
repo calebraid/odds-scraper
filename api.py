@@ -151,8 +151,10 @@ def get_nba_kalshi(auth: Annotated[dict, Depends(authenticate)], response: Respo
         "source": data.get("source"),
         "league": data.get("league"),
         "scraped_at": data.get("scraped_at"),
-        "count": data.get("count", len(data.get("markets", []))),
-        "markets": data.get("markets", []),
+        "futures_count": data.get("futures_count", len(data.get("futures", []))),
+        "game_markets_count": data.get("game_markets_count", len(data.get("game_markets", []))),
+        "futures": data.get("futures", []),
+        "game_markets": data.get("game_markets", []),
     }
     if warning:
         result["warning"] = warning
@@ -242,6 +244,7 @@ main{max-width:1400px;margin:0 auto;padding:2.5rem 2rem 5rem;display:flex;flex-d
 .k-stats{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
 .k-stat{background:rgba(255,255,255,.03);border-radius:8px;padding:.5rem .625rem}
 .k-stat-full{grid-column:1/-1}
+.subsec-hdr{font-size:.7rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--gold);opacity:.7;margin-bottom:.75rem}
 .k-slbl{font-size:.6rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);margin-bottom:.2rem}
 .k-sval{font-size:.85rem;font-weight:700;font-family:'JetBrains Mono',monospace}
 
@@ -295,11 +298,16 @@ main{max-width:1400px;margin:0 auto;padding:2.5rem 2rem 5rem;display:flex;flex-d
 
   <section>
     <div class="sec-hdr">
-      <h2 class="sec-title">NBA Finals <em>Markets</em></h2>
+      <h2 class="sec-title">Kalshi <em>Markets</em></h2>
       <span class="src-badge">Kalshi</span>
     </div>
+    <div class="subsec-hdr">Game Lines</div>
+    <div class="cards-grid" id="k-game-grid" style="margin-bottom:2rem">
+      <div class="loading"><div class="spinner"></div>Loading game markets&hellip;</div>
+    </div>
+    <div class="subsec-hdr">NBA Finals Futures</div>
     <div class="kalshi-grid" id="k-grid">
-      <div class="loading"><div class="spinner"></div>Loading Kalshi markets&hellip;</div>
+      <div class="loading"><div class="spinner"></div>Loading futures&hellip;</div>
     </div>
   </section>
 </main>
@@ -388,13 +396,45 @@ function renderProps(data) {
 </div>`).join('');
 }
 
-function renderKalshi(data) {
-  const el = document.getElementById('k-grid');
-  if (!data?.markets) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">&#128200;</div>Kalshi data unavailable.</div>';
+function renderKalshiGames(gameMarkets) {
+  const el = document.getElementById('k-game-grid');
+  if (!gameMarkets?.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">&#127936;</div>No game markets available right now.</div>';
     return;
   }
-  const mkts = [...data.markets].sort((a, b) => parseFloat(b.yes_ask || 0) - parseFloat(a.yes_ask || 0));
+  const byEvent = {};
+  for (const m of gameMarkets) {
+    (byEvent[m.event_ticker] = byEvent[m.event_ticker] || {})[m.market_type] = m;
+  }
+  const prow = (m, yLbl, nLbl) => m
+    ? `<div class="orow"><span class="side">${yLbl}</span><span class="oval pos">${pct(m.yes_ask)}&cent;</span></div>
+       <div class="orow"><span class="side">${nLbl}</span><span class="oval neg">${pct(m.no_ask)}&cent;</span></div>`
+    : `<div class="orow"><span class="side" style="color:#333">N/A</span></div>`;
+  el.innerHTML = Object.values(byEvent).map(ev => {
+    const w = ev.winner, t = ev.total, s = ev.spread;
+    const ct = w?.close_time || t?.close_time || s?.close_time;
+    const ctStr = ct ? new Date(ct).toLocaleString('en-US', {timeZone:'America/New_York', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : '';
+    return `<div class="game-card">
+  <div class="game-card-hdr">
+    <span class="matchup">${w?.yes_team || '?'} vs ${w?.no_team || '?'}</span>
+    ${ctStr ? `<span class="g-badge b-up">${ctStr} ET</span>` : ''}
+  </div>
+  <div class="odds-cols">
+    <div><div class="ocol-lbl">Winner</div>${prow(w, w?.yes_team || 'Yes', w?.no_team || 'No')}</div>
+    <div><div class="ocol-lbl">Total</div>${prow(t, t?.yes_team || 'Over', t?.no_team || 'Under')}</div>
+    <div><div class="ocol-lbl">Spread</div>${prow(s, s?.yes_team || 'Yes', s?.no_team || 'No')}</div>
+  </div>
+</div>`;
+  }).join('');
+}
+
+function renderKalshiFutures(futures) {
+  const el = document.getElementById('k-grid');
+  if (!futures?.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">&#127942;</div>No futures markets available.</div>';
+    return;
+  }
+  const mkts = [...futures].sort((a, b) => parseFloat(b.yes_ask || 0) - parseFloat(a.yes_ask || 0));
   el.innerHTML = mkts.map(m => {
     const y = pct(m.yes_ask), n = pct(m.no_ask);
     return `<div class="k-card">
@@ -420,7 +460,9 @@ async function fetchAll() {
   ]);
   renderGL(gl.status === 'fulfilled' ? gl.value : null);
   renderProps(props.status === 'fulfilled' ? props.value : null);
-  renderKalshi(kalshi.status === 'fulfilled' ? kalshi.value : null);
+  const kd = kalshi.status === 'fulfilled' ? kalshi.value : null;
+  renderKalshiGames(kd?.game_markets ?? null);
+  renderKalshiFutures(kd?.futures ?? null);
   lastFetch = Date.now();
 }
 
