@@ -12,9 +12,9 @@ from cryptography.hazmat.primitives.asymmetric import padding
 OUTPUT_DIR = "odds"
 INTERVAL_SECONDS = 60
 KALSHI_OUTPUT = os.path.join(OUTPUT_DIR, "kalshi_latest.json")
-KALSHI_BASE = "https://trading-api.kalshi.com"
+KALSHI_BASE = "https://api.elections.kalshi.com"
 
-_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "")
+_KEY_ID = os.environ.get("KALSHI_API_KEY", "")
 _KEY_PEM = os.environ.get("KALSHI_PRIVATE_KEY", "")
 
 # Normalize PEM in case the env var stores literal \n instead of real newlines
@@ -47,7 +47,7 @@ async def scrape_kalshi_nba() -> list[dict]:
     if not _private_key:
         raise RuntimeError("KALSHI_PRIVATE_KEY environment variable not set")
     if not _KEY_ID:
-        raise RuntimeError("KALSHI_API_KEY_ID environment variable not set")
+        raise RuntimeError("KALSHI_API_KEY environment variable not set")
 
     markets: list[dict] = []
     cursor: str | None = None
@@ -105,7 +105,7 @@ def save(markets: list[dict], timestamp: str) -> str:
 
 async def main():
     print(f"Kalshi NBA scraper  |  interval={INTERVAL_SECONDS}s")
-    print(f"  KALSHI_API_KEY_ID  : {_KEY_ID!r}")
+    print(f"  KALSHI_API_KEY     : {_KEY_ID!r}")
     _key_preview = (_KEY_PEM[:20] + "...") if _KEY_PEM else "NOT SET"
     print(f"  KALSHI_PRIVATE_KEY : {_key_preview!r}")
     print(f"  private key loaded : {_private_key is not None}")
