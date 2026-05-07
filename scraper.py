@@ -59,29 +59,29 @@ async def scrape_kalshi_nba() -> list[dict]:
             if cursor:
                 params["cursor"] = cursor
 
-            hdrs = make_kalshi_headers("GET", path)
-            print(f"  [kalshi] request headers: {hdrs}")
             resp = await client.get(
                 f"{KALSHI_BASE}{path}",
                 params=params,
-                headers=hdrs,
+                headers=make_kalshi_headers("GET", path),
             )
-            print(f"  [kalshi] response status: {resp.status_code}")
             resp.raise_for_status()
             data = resp.json()
 
-            raw_markets = data.get("markets") or []
-            if raw_markets:
-                print(f"  [kalshi] first market raw fields: {json.dumps(raw_markets[0], indent=2)}")
-            for m in raw_markets:
+            for m in (data.get("markets") or []):
                 markets.append({
                     "ticker": m.get("ticker"),
                     "event_ticker": m.get("event_ticker"),
                     "title": m.get("title"),
-                    "yes_price": m.get("yes_ask"),
-                    "no_price": m.get("no_ask"),
-                    "volume": m.get("volume"),
-                    "open_interest": m.get("open_interest"),
+                    "yes_team": m.get("yes_sub_title"),
+                    "no_team": m.get("no_sub_title"),
+                    "yes_bid": m.get("yes_bid_dollars"),
+                    "yes_ask": m.get("yes_ask_dollars"),
+                    "no_bid": m.get("no_bid_dollars"),
+                    "no_ask": m.get("no_ask_dollars"),
+                    "last_price": m.get("last_price_dollars"),
+                    "volume": m.get("volume_fp"),
+                    "open_interest": m.get("open_interest_fp"),
+                    "rules": m.get("rules_primary"),
                     "status": m.get("status"),
                 })
 
@@ -108,10 +108,6 @@ def save(markets: list[dict], timestamp: str) -> str:
 
 async def main():
     print(f"Kalshi NBA scraper  |  interval={INTERVAL_SECONDS}s")
-    print(f"  KALSHI_API_KEY     : {_KEY_ID!r}")
-    _key_preview = (_KEY_PEM[:20] + "...") if _KEY_PEM else "NOT SET"
-    print(f"  KALSHI_PRIVATE_KEY : {_key_preview!r}")
-    print(f"  private key loaded : {_private_key is not None}")
     run = 0
     while True:
         run += 1
