@@ -443,7 +443,7 @@ function renderKalshiGames(gameMarkets) {
     }).join('');
     return `<div class="game-card">
   <div class="game-card-hdr">
-    <span class="matchup">${ev.winner?.yes_team || ref?.yes_team || '?'} vs ${ev.winner?.no_team || ref?.no_team || '?'}</span>
+    <span class="matchup">${ev.winner ? `${ev.winner.yes_team} vs ${ev.winner.no_team}` : (ref?.title || `${ref?.yes_team || '?'} vs ${ref?.no_team || '?'}`)}</span>
     ${ctStr ? `<span class="g-badge b-up">${ctStr} ET</span>` : ''}
   </div>
   <div class="k-mrows">${rows}</div>

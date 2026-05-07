@@ -102,23 +102,6 @@ def parse_market(m: dict, market_type: str) -> dict:
     }
 
 
-async def discover_series() -> None:
-    """Fetch all series from Kalshi and log ticker + title for discovery."""
-    path = "/trade-api/v2/series"
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(
-            f"{KALSHI_BASE}{path}",
-            headers=make_kalshi_headers("GET", path),
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-    series_list = data.get("series") or []
-    print(f"  [discover] {len(series_list)} series total:")
-    for s in series_list:
-        print(f"    {s.get('ticker', '?'):20s}  {s.get('title', '')}")
-
-
 async def scrape_kalshi_nba() -> dict:
     """Fetch NBA futures (KXNBA) and game markets (KXNBAA/T/S) concurrently."""
     if not _private_key:
@@ -172,10 +155,6 @@ def save(data: dict, timestamp: str) -> str:
 
 async def main():
     print(f"Kalshi NBA scraper  |  interval={INTERVAL_SECONDS}s")
-    try:
-        await discover_series()
-    except Exception as exc:
-        print(f"  [discover] ERROR: {exc}")
     run = 0
     while True:
         run += 1
