@@ -16,7 +16,7 @@ import json
 import os
 import time
 import sys
-from datetime import datetime, date
+from datetime import datetime
 
 # ── nba_api imports ────────────────────────────────────────────────────────────
 from nba_api.stats.endpoints import (
@@ -25,9 +25,9 @@ from nba_api.stats.endpoints import (
     TeamEstimatedMetrics,
     LeagueStandings,
     TeamGameLog,
-    ScoreboardV3,
 )
 from nba_api.stats.static import teams as nba_teams
+from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 SEASON = "2024-25"
@@ -102,6 +102,7 @@ def scrape_team_stats():
         per_mode_detailed="PerGame",
         headers=NBA_HEADERS,
         timeout=REQUEST_TIMEOUT,
+        proxy=PROXY,
     )
     dash_df = dash.league_dash_team_stats.get_data_frame()
 
@@ -111,6 +112,7 @@ def scrape_team_stats():
         season=SEASON,
         headers=NBA_HEADERS,
         timeout=REQUEST_TIMEOUT,
+        proxy=PROXY,
     )
     metrics_df = metrics.team_estimated_metrics.get_data_frame()
 
@@ -120,6 +122,7 @@ def scrape_team_stats():
         season=SEASON,
         headers=NBA_HEADERS,
         timeout=REQUEST_TIMEOUT,
+        proxy=PROXY,
     )
     standings_df = standings.standings.get_data_frame()
 
@@ -202,6 +205,7 @@ def scrape_player_stats():
         per_mode_detailed="PerGame",
         headers=NBA_HEADERS,
         timeout=REQUEST_TIMEOUT,
+        proxy=PROXY,
     )
     df = dash.league_dash_player_stats.get_data_frame()
 
@@ -247,6 +251,7 @@ def scrape_player_stats_advanced():
         measure_type_detailed_defense="Advanced",
         headers=NBA_HEADERS,
         timeout=REQUEST_TIMEOUT,
+        proxy=PROXY,
     )
     df = dash.league_dash_player_stats.get_data_frame()
 
@@ -282,21 +287,19 @@ def scrape_player_stats_advanced():
 
 def scrape_today_games():
     """
-    Pulls today's games from ScoreboardV3.
-    Saves to today_games.json.
+    Pulls today's games from the NBA live data CDN (cdn.nba.com).
+    Uses a different server than stats.nba.com so it is far less likely
+    to be blocked on datacenter IPs.  Saves to today_games.json.
     """
-    today = date.today().strftime("%Y-%m-%d")
-    print(f"  fetching today's games ({today})...")
+    print("  fetching today's games (live endpoint)...")
 
-    scoreboard = retry_call(
-        ScoreboardV3,
-        game_date=today,
-        headers=NBA_HEADERS,
-        timeout=REQUEST_TIMEOUT,
-    )
+    kwargs = {}
+    if PROXY:
+        kwargs["proxy"] = PROXY
 
-    games_data = scoreboard.score_board.get_dict()
-    game_list = games_data.get("games", [])
+    sb = live_scoreboard.ScoreBoard(**kwargs)
+    data = sb.get_dict()
+    game_list = data.get("scoreboard", {}).get("games", [])
 
     today_games = []
     for g in game_list:
@@ -306,7 +309,7 @@ def scrape_today_games():
             "game_id": g.get("gameId", ""),
             "game_status": g.get("gameStatusText", ""),
             "game_status_code": g.get("gameStatus", 0),
-            "game_time_et": g.get("gameEt", ""),
+            "game_time_et": g.get("gameEt", g.get("gameTimeUTC", "")),
             "home_team_id": home.get("teamId", 0),
             "home_team": home.get("teamName", ""),
             "home_team_abbrev": home.get("teamTricode", ""),
@@ -341,6 +344,7 @@ def scrape_recent_games(all_team_ids: list):
                 season=SEASON,
                 headers=NBA_HEADERS,
                 timeout=REQUEST_TIMEOUT,
+                proxy=PROXY,
             )
             df = log.team_game_log.get_data_frame().head(10)
 
