@@ -50,12 +50,21 @@ def _save_history(history: list[dict]) -> None:
             "accuracy_pct": round(c / t * 100, 1) if t else None,
         }
 
+    # Edge accuracy: when we had positive edge, how often were we correct?
+    positive_edge_entries = [e for e in history if e.get("positive_edge")]
+    pe_total = len(positive_edge_entries)
+    pe_correct = sum(1 for e in positive_edge_entries if e.get("correct"))
+    edge_accuracy = round(pe_correct / pe_total * 100, 1) if pe_total else None
+
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "total_predictions": total,
         "resolved_predictions": total,
         "correct": correct,
         "accuracy_pct": accuracy,
+        "edge_accuracy_pct": edge_accuracy,
+        "positive_edge_total": pe_total,
+        "positive_edge_correct": pe_correct,
         "by_type": accuracy_by_type,
         "history": history,
     }
@@ -109,6 +118,17 @@ def resolve_predictions() -> int:
         confidence = min(max(float(raw_conf), 0), 100)
 
         correct = pred.get("prediction") == outcome
+
+        # Edge data from the stored feature snapshot
+        features = pred.get("features_snapshot") or {}
+        edge = features.get("edge")
+        if edge is None:
+            # Fallback: derive from stored yes_ask and confidence
+            stored_yes = float(pred.get("yes_ask") or 0.5)
+            our_prob = confidence / 100 if pred.get("prediction") == "YES" else (1 - confidence / 100)
+            edge = round(our_prob - stored_yes, 3)
+        positive_edge = edge > 0
+
         history.append({
             "ticker": ticker,
             "market_type": pred.get("market_type"),
@@ -118,6 +138,10 @@ def resolve_predictions() -> int:
             "method": pred.get("method"),
             "outcome": outcome,
             "correct": correct,
+            "edge": round(float(edge), 3),
+            "positive_edge": positive_edge,
+            "positive_edge_correct": positive_edge and correct,
+            "features_snapshot": features,
             "resolved_at": datetime.now(timezone.utc).isoformat(),
         })
         resolved_tickers.add(ticker)

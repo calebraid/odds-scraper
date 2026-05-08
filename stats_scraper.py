@@ -267,6 +267,16 @@ def _compute_team_stats_from_cache(cache: dict) -> dict:
         l10w = sum(1 for g in last10 if g["won"])
         last_10 = f"{l10w}-{len(last10) - l10w}"
 
+        # Current streak: consecutive wins (positive) or losses (negative)
+        streak = 0
+        if games_sorted:
+            is_win = games_sorted[0]["won"]
+            for g in games_sorted:
+                if g["won"] == is_win:
+                    streak += 1 if is_win else -1
+                else:
+                    break
+
         # Home / away records from cache window
         home_g = [g for g in games_sorted if g["is_home"]]
         hw = sum(1 for g in home_g if g["won"])
@@ -309,6 +319,7 @@ def _compute_team_stats_from_cache(cache: dict) -> dict:
             "e_def_rating": None,
             "e_net_rating": None,
             "e_pace":       None,
+            "streak":       streak,
             "cache_games":  n_total,
             "updated_at":   datetime.utcnow().isoformat(),
         }
@@ -574,6 +585,7 @@ def run_once():
                 "last_10": None, "home_record": None, "away_record": None,
                 "e_off_rating": None, "e_def_rating": None,
                 "e_net_rating": None, "e_pace": None,
+                "streak": 0,
                 "cache_games": 0,
                 "updated_at": datetime.utcnow().isoformat(),
             }
@@ -602,6 +614,7 @@ def run_once():
                 "last_10": None, "home_record": None, "away_record": None,
                 "e_off_rating": None, "e_def_rating": None,
                 "e_net_rating": None, "e_pace": None,
+                "streak": 0,
                 "cache_games": 0,
                 "updated_at": datetime.utcnow().isoformat(),
             })

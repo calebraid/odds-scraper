@@ -3,7 +3,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from features import build_features, _load_teams, _load_recent
+from features import build_features, _load_teams, _load_recent, _load_players
 from model import predict
 
 ODDS_DIR = "odds"
@@ -24,6 +24,7 @@ def run_predictions() -> list[dict]:
     game_markets = kalshi.get("game_markets", [])
     teams = _load_teams()
     recent = _load_recent()
+    players = _load_players()
 
     if not teams:
         print("  predictions: team_stats.json not found or empty, skipping")
@@ -36,7 +37,7 @@ def run_predictions() -> list[dict]:
         if mtype not in PREDICTABLE_TYPES:
             continue
 
-        features = build_features(market, teams=teams, recent=recent)
+        features = build_features(market, teams=teams, recent=recent, players=players)
         if features is None:
             continue
 

@@ -211,7 +211,7 @@ def get_predictions_accuracy(auth: Annotated[dict, Depends(authenticate)], respo
     path = os.path.join(STATS_DIR, "prediction_history.json")
     if not os.path.exists(path):
         return JSONResponse(
-            content={"total_predictions": 0, "resolved_predictions": 0, "correct": 0, "accuracy_pct": None, "by_type": {}},
+            content={"total_predictions": 0, "resolved_predictions": 0, "correct": 0, "accuracy_pct": None, "edge_accuracy_pct": None, "by_type": {}},
             headers=dict(response.headers),
         )
     with open(path, encoding="utf-8") as f:
@@ -222,8 +222,76 @@ def get_predictions_accuracy(auth: Annotated[dict, Depends(authenticate)], respo
         "resolved_predictions": data.get("resolved_predictions", 0),
         "correct": data.get("correct", 0),
         "accuracy_pct": data.get("accuracy_pct"),
+        "edge_accuracy_pct": data.get("edge_accuracy_pct"),
+        "positive_edge_total": data.get("positive_edge_total", 0),
+        "positive_edge_correct": data.get("positive_edge_correct", 0),
         "by_type": data.get("by_type", {}),
     }
+    return JSONResponse(content=result, headers=dict(response.headers))
+
+
+@app.get("/model/features", summary="Feature importance from the latest ML training run")
+def get_model_features(auth: Annotated[dict, Depends(authenticate)], response: Response):
+    _set_rate_limit_headers(response, auth)
+    path = os.path.join(STATS_DIR, "feature_importance.json")
+    if not os.path.exists(path):
+        raise HTTPException(
+            status_code=503,
+            detail="Feature importance unavailable — model has not been trained yet.",
+        )
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return JSONResponse(content=data, headers=dict(response.headers))
+
+
+@app.get("/predictions/edge", summary="High-value predictions where our probability differs from Kalshi by >10%")
+def get_predictions_edge(auth: Annotated[dict, Depends(authenticate)], response: Response):
+    _set_rate_limit_headers(response, auth)
+    data = load_odds("predictions_latest.json")
+    warning = staleness_warning(data.get("generated_at"))
+
+    edge_predictions = []
+    for p in data.get("predictions", []):
+        features = p.get("features_snapshot") or {}
+        edge = features.get("edge")
+
+        if edge is None:
+            # Derive from confidence and direction when features snapshot lacks edge
+            conf = (p.get("confidence") or 50) / 100
+            yes_ask = float(p.get("yes_ask") or 0.5)
+            our_prob = conf if p.get("prediction") == "YES" else (1.0 - conf)
+            edge = our_prob - yes_ask
+
+        if abs(edge) > 0.10:
+            yes_ask = float(p.get("yes_ask") or 0.5)
+            edge_predictions.append({
+                "ticker": p.get("ticker"),
+                "event_ticker": p.get("event_ticker"),
+                "market_type": p.get("market_type"),
+                "title": p.get("title"),
+                "yes_team": p.get("yes_team"),
+                "no_team": p.get("no_team"),
+                "prediction": p.get("prediction"),
+                "confidence": p.get("confidence"),
+                "method": p.get("method"),
+                "yes_ask": p.get("yes_ask"),
+                "no_ask": p.get("no_ask"),
+                "our_win_prob": features.get("our_win_prob"),
+                "kalshi_implied_pct": round(yes_ask * 100, 1),
+                "edge": round(float(edge), 3),
+                "edge_pct": round(float(edge) * 100, 1),
+            })
+
+    edge_predictions.sort(key=lambda p: abs(p.get("edge") or 0), reverse=True)
+
+    result = {
+        "generated_at": data.get("generated_at"),
+        "count": len(edge_predictions),
+        "threshold_pct": 10,
+    }
+    if warning:
+        result["warning"] = warning
+    result["predictions"] = edge_predictions
     return JSONResponse(content=result, headers=dict(response.headers))
 
 

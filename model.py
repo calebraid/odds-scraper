@@ -1,21 +1,41 @@
+import json
 import os
 
 import joblib
 import numpy as np
 
 MODELS_DIR = "models"
+STATS_DIR = "stats"
 MODEL_PATH = os.path.join(MODELS_DIR, "nba_model.pkl")
+FEATURE_IMPORTANCE_PATH = os.path.join(STATS_DIR, "feature_importance.json")
 
 FEATURE_NAMES = [
-    "t1_win_pct", "t2_win_pct",
-    "t1_off_rtg", "t2_off_rtg",
-    "t1_def_rtg", "t2_def_rtg",
-    "t1_net_rtg", "t2_net_rtg",
-    "t1_pace", "t2_pace",
-    "t1_ppg", "t2_ppg",
-    "t1_last5", "t2_last5",
-    "win_pct_diff", "net_rtg_diff", "off_rtg_diff",
-    "pace_avg",
+    # YES-team stats
+    "t1_win_pct", "t1_wins", "t1_losses",
+    "t1_pts", "t1_opp_pts", "t1_pts_differential",
+    "t1_reb", "t1_ast", "t1_stl", "t1_blk", "t1_tov",
+    "t1_fg_pct", "t1_fg3_pct", "t1_ft_pct",
+    "t1_off_rtg", "t1_def_rtg", "t1_net_rtg", "t1_pace",
+    "t1_home_pct", "t1_away_pct", "t1_last10_pct", "t1_streak",
+    # NO-team stats
+    "t2_win_pct", "t2_wins", "t2_losses",
+    "t2_pts", "t2_opp_pts", "t2_pts_differential",
+    "t2_reb", "t2_ast", "t2_stl", "t2_blk", "t2_tov",
+    "t2_fg_pct", "t2_fg3_pct", "t2_ft_pct",
+    "t2_off_rtg", "t2_def_rtg", "t2_net_rtg", "t2_pace",
+    "t2_home_pct", "t2_away_pct", "t2_last10_pct", "t2_streak",
+    # Matchup differentials
+    "win_pct_diff", "pts_diff", "pts_against_diff",
+    "net_rtg_diff", "off_rtg_diff", "pace_diff",
+    "stl_diff", "blk_diff", "tov_diff",
+    # Player features
+    "t1_top3_avg_pts", "t2_top3_avg_pts",
+    "t1_top_scorer_pts", "t2_top_scorer_pts",
+    "t1_total_stl", "t2_total_stl",
+    "t1_total_blk", "t2_total_blk",
+    "player_pts_diff",
+    # Market context
+    "kalshi_yes_price", "market_line", "our_win_prob", "edge",
 ]
 
 _WINNER_TYPES = {"winner", "2h_winner", "series_spread"}
@@ -42,8 +62,8 @@ def _baseline_winner(features: dict) -> dict:
     diff = features.get("win_pct_diff", 0.0)
     net_diff = features.get("net_rtg_diff", 0.0)
     score = diff * 0.6 + net_diff * 0.025
-    last5_diff = features.get("t1_last5", 0.5) - features.get("t2_last5", 0.5)
-    score += last5_diff * 0.15
+    last10_diff = features.get("t1_last10_pct", 0.5) - features.get("t2_last10_pct", 0.5)
+    score += last10_diff * 0.15
 
     confidence = min(95, 50 + abs(score) * 80)
     prediction = "YES" if score >= 0 else "NO"
@@ -175,10 +195,36 @@ def predict(features: dict, market_type: str) -> dict:
     return _baseline_winner(features)
 
 
+def _log_feature_importance(model_name: str, model, n_top: int = 10) -> list[dict]:
+    importances = model.feature_importances_
+    ranked = sorted(
+        zip(FEATURE_NAMES, importances),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    print(f"  [{model_name}] top {n_top} features:")
+    for feat, imp in ranked[:n_top]:
+        print(f"    {feat:<28} {imp:.4f}")
+    return [{"feature": f, "importance": round(float(imp), 6)} for f, imp in ranked]
+
+
+def _save_feature_importance(importance_by_model: dict) -> None:
+    os.makedirs(STATS_DIR, exist_ok=True)
+    from datetime import datetime, timezone
+    payload = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "feature_count": len(FEATURE_NAMES),
+        "models": importance_by_model,
+    }
+    with open(FEATURE_IMPORTANCE_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    print(f"  feature importance saved → {FEATURE_IMPORTANCE_PATH}")
+
+
 def train(training_data: list[dict]) -> bool:
-    """Train models from labeled data. Each entry needs features + outcome."""
     try:
         from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+        from sklearn.model_selection import cross_val_score
 
         winner_X, winner_y = [], []
         total_X, total_y = [], []
@@ -204,27 +250,42 @@ def train(training_data: list[dict]) -> bool:
 
         os.makedirs(MODELS_DIR, exist_ok=True)
         trained = {}
+        importance_by_model = {}
 
         if len(winner_X) >= 10:
             clf = GradientBoostingClassifier(n_estimators=100, random_state=42)
+            if len(winner_X) >= 50:
+                cv_scores = cross_val_score(clf, winner_X, winner_y, cv=5, scoring="accuracy")
+                print(f"  winner CV accuracy: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
             clf.fit(winner_X, winner_y)
             trained["winner"] = clf
+            importance_by_model["winner"] = _log_feature_importance("winner", clf)
             print(f"  trained winner classifier on {len(winner_X)} samples")
 
         if len(total_X) >= 10:
             reg = GradientBoostingRegressor(n_estimators=100, random_state=42)
+            if len(total_X) >= 50:
+                cv_scores = cross_val_score(reg, total_X, total_y, cv=5, scoring="r2")
+                print(f"  total CV R²: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
             reg.fit(total_X, total_y)
             trained["total"] = reg
+            importance_by_model["total"] = _log_feature_importance("total", reg)
             print(f"  trained total regressor on {len(total_X)} samples")
 
         if len(spread_X) >= 10:
             reg = GradientBoostingRegressor(n_estimators=100, random_state=42)
+            if len(spread_X) >= 50:
+                cv_scores = cross_val_score(reg, spread_X, spread_y, cv=5, scoring="r2")
+                print(f"  spread CV R²: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
             reg.fit(spread_X, spread_y)
             trained["spread"] = reg
+            importance_by_model["spread"] = _log_feature_importance("spread", reg)
             print(f"  trained spread regressor on {len(spread_X)} samples")
 
         if trained:
             joblib.dump(trained, MODEL_PATH)
+            if importance_by_model:
+                _save_feature_importance(importance_by_model)
             global _models
             _models = trained
             return True
