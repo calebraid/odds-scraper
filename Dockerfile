@@ -9,8 +9,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p odds && chmod +x start.sh
+RUN mkdir -p odds stats
 
 EXPOSE 8000
 
-CMD ["./start.sh"]
+CMD ["python", "main.py"]
