@@ -441,6 +441,17 @@ def run_loop(interval_seconds: int = 3600):
         time.sleep(interval_seconds)
 
 
+async def main():
+    """
+    Async entry point called by main.py.
+    Runs the scrape loop in a thread so it doesn't block the event loop.
+    """
+    import asyncio
+    interval = int(os.getenv("STATS_INTERVAL", "3600"))
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, run_loop, interval)
+
+
 if __name__ == "__main__":
     # Pass --once to run a single scrape and exit (useful for testing)
     if "--once" in sys.argv:
