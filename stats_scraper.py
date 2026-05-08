@@ -33,8 +33,10 @@ from nba_api.stats.static import teams as nba_teams
 SEASON = "2024-25"
 STATS_DIR = "stats"
 SLEEP_BETWEEN_CALLS = 1.0   # seconds — be polite to stats.nba.com
-RETRY_ATTEMPTS = 3
-RETRY_DELAY = 5.0
+REQUEST_TIMEOUT = 60
+RETRY_ATTEMPTS = 5
+RETRY_DELAY = 15.0
+PROXY = os.getenv("SCRAPER_PROXY", None)
 
 # Custom headers to avoid 403s from stats.nba.com
 NBA_HEADERS = {
@@ -69,7 +71,10 @@ def save_json(filename: str, data):
 
 
 def retry_call(fn, *args, **kwargs):
-    """Call fn(*args, **kwargs) with retries on failure."""
+    """Call fn(*args, **kwargs) with retries on progressive backoff."""
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT)
+    if PROXY:
+        kwargs.setdefault("proxy", PROXY)
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             result = fn(*args, **kwargs)
@@ -78,7 +83,8 @@ def retry_call(fn, *args, **kwargs):
         except Exception as e:
             print(f"  attempt {attempt}/{RETRY_ATTEMPTS} failed: {e}")
             if attempt < RETRY_ATTEMPTS:
-                time.sleep(RETRY_DELAY)
+                delay = RETRY_DELAY * attempt
+                time.sleep(delay)
     raise RuntimeError(f"All {RETRY_ATTEMPTS} attempts failed for {fn.__name__}")
 
 
@@ -95,7 +101,7 @@ def scrape_team_stats():
         season=SEASON,
         per_mode_detailed="PerGame",
         headers=NBA_HEADERS,
-        timeout=30,
+        timeout=REQUEST_TIMEOUT,
     )
     dash_df = dash.league_dash_team_stats.get_data_frame()
 
@@ -104,7 +110,7 @@ def scrape_team_stats():
         TeamEstimatedMetrics,
         season=SEASON,
         headers=NBA_HEADERS,
-        timeout=30,
+        timeout=REQUEST_TIMEOUT,
     )
     metrics_df = metrics.team_estimated_metrics.get_data_frame()
 
@@ -113,7 +119,7 @@ def scrape_team_stats():
         LeagueStandings,
         season=SEASON,
         headers=NBA_HEADERS,
-        timeout=30,
+        timeout=REQUEST_TIMEOUT,
     )
     standings_df = standings.standings.get_data_frame()
 
@@ -195,7 +201,7 @@ def scrape_player_stats():
         season=SEASON,
         per_mode_detailed="PerGame",
         headers=NBA_HEADERS,
-        timeout=30,
+        timeout=REQUEST_TIMEOUT,
     )
     df = dash.league_dash_player_stats.get_data_frame()
 
@@ -240,7 +246,7 @@ def scrape_player_stats_advanced():
         per_mode_detailed="PerGame",
         measure_type_detailed_defense="Advanced",
         headers=NBA_HEADERS,
-        timeout=30,
+        timeout=REQUEST_TIMEOUT,
     )
     df = dash.league_dash_player_stats.get_data_frame()
 
@@ -286,7 +292,7 @@ def scrape_today_games():
         ScoreboardV3,
         game_date=today,
         headers=NBA_HEADERS,
-        timeout=30,
+        timeout=REQUEST_TIMEOUT,
     )
 
     games_data = scoreboard.score_board.get_dict()
@@ -334,7 +340,7 @@ def scrape_recent_games(all_team_ids: list):
                 team_id=team_id,
                 season=SEASON,
                 headers=NBA_HEADERS,
-                timeout=30,
+                timeout=REQUEST_TIMEOUT,
             )
             df = log.team_game_log.get_data_frame().head(10)
 
