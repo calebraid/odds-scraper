@@ -37,6 +37,11 @@ REQUEST_TIMEOUT = 60
 RETRY_ATTEMPTS = 5
 RETRY_DELAY = 15.0
 PROXY = os.getenv("SCRAPER_PROXY", None)
+print(f"[stats] proxy configured: {bool(PROXY)}")
+print(f"[stats] SCRAPER_PROXY set: {'yes - ' + PROXY[:20] + '...' if PROXY else 'NO - will hit NBA directly'}")
+if PROXY:
+    os.environ["HTTPS_PROXY"] = PROXY
+    os.environ["HTTP_PROXY"] = PROXY
 
 # Custom headers to avoid 403s from stats.nba.com
 NBA_HEADERS = {
@@ -390,6 +395,13 @@ def scrape_recent_games(all_team_ids: list):
 def run_once():
     print(f"\n[stats] scrape started at {datetime.utcnow().isoformat()}")
     ensure_stats_dir()
+
+    import requests
+    try:
+        r = requests.get("https://ipv4.webshare.io/", proxies={"https": PROXY} if PROXY else None, timeout=10)
+        print(f"[stats] proxy test: {r.text.strip()}")
+    except Exception as e:
+        print(f"[stats] proxy test failed: {e}")
 
     errors = []
 
