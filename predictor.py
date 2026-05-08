@@ -59,6 +59,11 @@ def run_predictions() -> list[dict]:
             "features_snapshot": features,
         })
 
+    if predictions:
+        p = predictions[0]
+        print(f"  sample: [{p['market_type']}] {p['title']} -> "
+              f"{p['prediction']} ({p['confidence']:.0%} conf, method={p['method']})")
+
     return predictions
 
 

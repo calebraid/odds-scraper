@@ -47,7 +47,11 @@ def _load_teams() -> list[dict]:
     if not os.path.exists(path):
         return []
     with open(path, encoding="utf-8") as f:
-        return json.load(f).get("teams", [])
+        data = json.load(f)
+    # Current format: bare list.  Legacy format: {"teams": [...]}.
+    if isinstance(data, list):
+        return data
+    return data.get("teams", [])
 
 
 def _load_recent() -> dict[str, list[dict]]:
@@ -121,18 +125,25 @@ def build_features(market: dict, teams: list[dict] | None = None, recent: dict |
         except (TypeError, ValueError):
             return default
 
-    t1_win_pct = safe(t1.get("win_pct"), 0.5)
-    t2_win_pct = safe(t2.get("win_pct"), 0.5)
-    t1_off = safe(t1.get("off_rtg"), 110.0)
-    t2_off = safe(t2.get("off_rtg"), 110.0)
-    t1_def = safe(t1.get("def_rtg"), 110.0)
-    t2_def = safe(t2.get("def_rtg"), 110.0)
-    t1_net = safe(t1.get("net_rtg"), 0.0)
-    t2_net = safe(t2.get("net_rtg"), 0.0)
-    t1_pace = safe(t1.get("pace"), 100.0)
-    t2_pace = safe(t2.get("pace"), 100.0)
-    t1_ppg = safe(t1.get("ppg"), 110.0)
-    t2_ppg = safe(t2.get("ppg"), 110.0)
+    def _pick(team: dict, *keys, default: float = 0.0) -> float:
+        for k in keys:
+            v = team.get(k)
+            if v is not None:
+                return safe(v, default)
+        return default
+
+    t1_win_pct = _pick(t1, "win_pct", default=0.5)
+    t2_win_pct = _pick(t2, "win_pct", default=0.5)
+    t1_off  = _pick(t1, "off_rtg", "e_off_rating", default=110.0)
+    t2_off  = _pick(t2, "off_rtg", "e_off_rating", default=110.0)
+    t1_def  = _pick(t1, "def_rtg", "e_def_rating", default=110.0)
+    t2_def  = _pick(t2, "def_rtg", "e_def_rating", default=110.0)
+    t1_net  = _pick(t1, "net_rtg", "e_net_rating", default=0.0)
+    t2_net  = _pick(t2, "net_rtg", "e_net_rating", default=0.0)
+    t1_pace = _pick(t1, "pace", "e_pace", default=100.0)
+    t2_pace = _pick(t2, "pace", "e_pace", default=100.0)
+    t1_ppg  = _pick(t1, "ppg", "pts", default=110.0)
+    t2_ppg  = _pick(t2, "ppg", "pts", default=110.0)
 
     return {
         "t1_win_pct": t1_win_pct,
