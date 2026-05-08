@@ -62,7 +62,7 @@ def run_predictions() -> list[dict]:
     if predictions:
         p = predictions[0]
         print(f"  sample: [{p['market_type']}] {p['title']} -> "
-              f"{p['prediction']} ({p['confidence']:.0%} conf, method={p['method']})")
+              f"{p['prediction']} ({p['confidence']:.0f}% conf, method={p['method']})")
 
     return predictions
 

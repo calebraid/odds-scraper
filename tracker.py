@@ -74,11 +74,14 @@ def resolve_predictions() -> int:
     history = _load_history()
     resolved_tickers = {e["ticker"] for e in history}
 
+    already_logged = len(resolved_tickers)
+    unresolved = [p for p in predictions if p.get("ticker") not in resolved_tickers]
+    settled = 0
     new_entries = 0
 
-    for pred in predictions:
+    for pred in unresolved:
         ticker = pred.get("ticker")
-        if not ticker or ticker in resolved_tickers:
+        if not ticker:
             continue
 
         market = kalshi_by_ticker.get(ticker)
@@ -101,13 +104,17 @@ def resolve_predictions() -> int:
         else:
             continue
 
+        settled += 1
+        raw_conf = pred.get("confidence") or 0
+        confidence = min(max(float(raw_conf), 0), 100)
+
         correct = pred.get("prediction") == outcome
         history.append({
             "ticker": ticker,
             "market_type": pred.get("market_type"),
             "title": pred.get("title"),
             "prediction": pred.get("prediction"),
-            "confidence": pred.get("confidence"),
+            "confidence": round(confidence, 1),
             "method": pred.get("method"),
             "outcome": outcome,
             "correct": correct,
@@ -116,11 +123,16 @@ def resolve_predictions() -> int:
         resolved_tickers.add(ticker)
         new_entries += 1
 
+    print(
+        f"  tracker: {len(predictions)} predictions loaded | "
+        f"{already_logged} already logged | "
+        f"{len(unresolved)} checked | "
+        f"{settled} settled (yes>={_YES_THRESHOLD} or <={_NO_THRESHOLD}) | "
+        f"{new_entries} new history entries"
+    )
+
     if new_entries:
         _save_history(history)
-        print(f"  resolved {new_entries} predictions")
-    else:
-        print("  no new resolutions")
 
     return new_entries
 
