@@ -62,11 +62,6 @@ def make_kalshi_headers(method: str, path: str) -> dict:
 
 
 async def _discover_nba_series(client: httpx.AsyncClient) -> list[str]:
-    """Fetch /series and log every NBA-related series ticker.
-
-    Called once per scrape run for visibility — the result guides which
-    series tickers to use for game winner fetches.
-    """
     path = "/trade-api/v2/series"
     try:
         resp = await client.get(
@@ -81,23 +76,14 @@ async def _discover_nba_series(client: httpx.AsyncClient) -> list[str]:
             if "NBA" in (s.get("ticker") or "").upper()
             or "NBA" in (s.get("title") or "").upper()
         ]
-        if nba:
-            print(f"  [series] {len(nba)} NBA series found:")
-            for s in nba:
-                print(f"    ticker={s.get('ticker')}  title={s.get('title')}")
-        else:
-            print(f"  [series] 0 NBA series found in {len(all_series)} total | "
-                  f"sample: {[s.get('ticker') for s in all_series[:8]]}")
         return [s.get("ticker") for s in nba if s.get("ticker")]
-    except Exception as exc:
-        print(f"  [series] ERROR: {exc}")
+    except Exception:
         return []
 
 
-async def _fetch_winner_markets_with_debug(client: httpx.AsyncClient) -> list[dict]:
+async def _fetch_winner_markets(client: httpx.AsyncClient) -> list[dict]:
     """Try KXNBAA and fallback tickers to find NBA winner markets.
 
-    Logs the raw response preview so we can diagnose empty results.
     Returns the first non-empty result list found.
     """
     path = "/trade-api/v2/markets"
@@ -114,29 +100,11 @@ async def _fetch_winner_markets_with_debug(client: httpx.AsyncClient) -> list[di
                     params=params,
                     headers=make_kalshi_headers("GET", path),
                 )
-                data = resp.json()
-                markets = data.get("markets") or []
-                label = f"series_ticker={ticker} status={status_val}"
-                print(f"  [KXNBAA-debug] {label}: {len(markets)} market(s) | "
-                      f"raw={str(data)[:300]}")
+                markets = resp.json().get("markets") or []
                 if markets:
-                    print(f"  [KXNBAA-debug] SUCCESS with {label}, using these markets")
                     return markets
-            except Exception as exc:
-                print(f"  [KXNBAA-debug] series_ticker={ticker} status={status_val}: ERROR {exc}")
-
-    # Last-resort: try fetching by tickers= param (looks up a specific ticker, not series)
-    try:
-        params = {"tickers": "KXNBAA", "limit": 5}
-        resp = await client.get(
-            f"{KALSHI_BASE}{path}",
-            params=params,
-            headers=make_kalshi_headers("GET", path),
-        )
-        data = resp.json()
-        print(f"  [KXNBAA-debug] tickers=KXNBAA lookup: {str(data)[:300]}")
-    except Exception as exc:
-        print(f"  [KXNBAA-debug] tickers=KXNBAA lookup: ERROR {exc}")
+            except Exception:
+                pass
 
     return []
 
@@ -263,7 +231,7 @@ async def scrape_kalshi_nba() -> dict:
                 for s in all_series
             ],
             _discover_nba_series(client),
-            _fetch_winner_markets_with_debug(client),
+            _fetch_winner_markets(client),
             return_exceptions=True,
         )
 
