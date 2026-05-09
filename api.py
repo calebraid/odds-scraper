@@ -295,6 +295,76 @@ def get_predictions_edge(auth: Annotated[dict, Depends(authenticate)], response:
     return JSONResponse(content=result, headers=dict(response.headers))
 
 
+@app.get("/api/predictions", summary="Raw predictions for the dashboard (no auth required)")
+def api_predictions_raw():
+    result: dict = {
+        "generated_at": None,
+        "count": 0,
+        "by_type": {},
+        "predictions": [],
+        "accuracy": None,
+        "system": {
+            "cache_size": 0,
+            "last_scrape": None,
+            "proxy_configured": bool(os.environ.get("SCRAPER_PROXY")),
+        },
+    }
+
+    pred_path = os.path.join(ODDS_DIR, "predictions_latest.json")
+    if os.path.exists(pred_path):
+        with open(pred_path, encoding="utf-8") as f:
+            pred_data = json.load(f)
+        result["generated_at"] = pred_data.get("generated_at")
+        result["count"] = pred_data.get("count", 0)
+        result["by_type"] = pred_data.get("by_type", {})
+        for p in pred_data.get("predictions", []):
+            features = p.get("features_snapshot") or {}
+            result["predictions"].append({
+                "ticker": p.get("ticker"),
+                "event_ticker": p.get("event_ticker"),
+                "market_type": p.get("market_type"),
+                "title": p.get("title"),
+                "yes_team": p.get("yes_team"),
+                "no_team": p.get("no_team"),
+                "yes_ask": p.get("yes_ask"),
+                "no_ask": p.get("no_ask"),
+                "prediction": p.get("prediction"),
+                "confidence": p.get("confidence"),
+                "method": p.get("method"),
+                "predicted_value": p.get("predicted_value"),
+                "edge": features.get("edge"),
+                "our_win_prob": features.get("our_win_prob"),
+            })
+        result["predictions"].sort(key=lambda p: p.get("confidence") or 0, reverse=True)
+
+    hist_path = os.path.join(STATS_DIR, "prediction_history.json")
+    if os.path.exists(hist_path):
+        with open(hist_path, encoding="utf-8") as f:
+            hist = json.load(f)
+        result["accuracy"] = {
+            "accuracy_pct": hist.get("accuracy_pct"),
+            "total": hist.get("resolved_predictions", 0),
+            "correct": hist.get("correct", 0),
+            "edge_accuracy_pct": hist.get("edge_accuracy_pct"),
+            "positive_edge_total": hist.get("positive_edge_total", 0),
+        }
+
+    cache_path = os.path.join(STATS_DIR, "boxscore_cache.json")
+    if os.path.exists(cache_path):
+        with open(cache_path, encoding="utf-8") as f:
+            cache = json.load(f)
+        result["system"]["cache_size"] = len(cache)
+
+    today_path = os.path.join(STATS_DIR, "today_games.json")
+    if os.path.exists(today_path):
+        with open(today_path, encoding="utf-8") as f:
+            today_data = json.load(f)
+        if isinstance(today_data, list) and today_data:
+            result["system"]["last_scrape"] = today_data[0].get("updated_at")
+
+    return JSONResponse(content=result)
+
+
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
 def dashboard():
     return HTMLResponse(content=_DASHBOARD_HTML)
@@ -302,7 +372,7 @@ def dashboard():
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def landing_page():
-    return HTMLResponse(content=_LANDING_HTML)
+    return HTMLResponse(content=_PREDICTIONS_DASHBOARD_HTML)
 
 
 _DASHBOARD_HTML = """<!DOCTYPE html>
@@ -659,334 +729,377 @@ fetchAll();
 </html>"""
 
 
-_LANDING_HTML = """<!DOCTYPE html>
+_PREDICTIONS_DASHBOARD_HTML = """
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OddsAPI — Kalshi NBA Markets</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<title>NBA Prediction Engine</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#0a0a0a;--surface:#111;--green:#00ff88;--green-glow:rgba(0,255,136,.15);--text:#fff;--dim:#888;--border:rgba(255,255,255,.08)}
+:root{--bg:#080810;--surface:#10101c;--surface2:#16162a;--border:rgba(255,255,255,0.07);--border-h:rgba(255,255,255,0.14);--text:#e8e8f0;--muted:#6b6b7e;--accent:#818cf8;--accent-dim:rgba(129,140,248,0.12);--green:#4ade80;--red:#f87171;--amber:#fbbf24;--row-yes:rgba(74,222,128,0.055);--row-no:rgba(248,113,113,0.055);--row-neutral:rgba(251,191,36,0.045)}
 *{margin:0;padding:0;box-sizing:border-box}
 html{scroll-behavior:smooth}
-body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;overflow-x:hidden}
+body{background:var(--bg);color:var(--text);font-family:"Inter",-apple-system,sans-serif;font-size:14px;line-height:1.5;min-height:100vh}
 
-nav{position:fixed;top:0;left:0;right:0;z-index:100;padding:1rem 2rem;display:flex;align-items:center;justify-content:space-between;background:rgba(10,10,10,.85);backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
-.logo{font-size:1.2rem;font-weight:900;color:var(--green);letter-spacing:-.5px;text-decoration:none}
-.nav-links{display:flex;gap:2rem;align-items:center}
-.nav-links a{color:var(--dim);text-decoration:none;font-size:.875rem;font-weight:500;transition:color .2s}
-.nav-links a:hover{color:var(--text)}
-.nav-cta{background:var(--green)!important;color:#000!important;padding:.45rem 1.2rem;border-radius:6px;font-weight:700!important}
+header{background:rgba(8,8,16,0.96);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.header-left h1{font-size:18px;font-weight:800;letter-spacing:-0.5px}
+.header-left h1 span{color:var(--accent)}
+.header-subtitle{font-size:12px;color:var(--muted);margin-top:2px;font-family:"JetBrains Mono",monospace}
+.header-right{display:flex;align-items:center;gap:16px;flex-shrink:0}
+.counter-chip{background:var(--accent-dim);border:1px solid rgba(129,140,248,0.25);border-radius:100px;padding:4px 14px;font-size:13px;font-weight:600;color:var(--accent);font-family:"JetBrains Mono",monospace}
+.live-badge{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+.dot-live{width:6px;height:6px;background:var(--green);border-radius:50%;animation:blink 2s infinite;flex-shrink:0}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
 
-.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:8rem 2rem 4rem;position:relative;overflow:hidden}
-.hero-glow{position:absolute;width:700px;height:700px;background:radial-gradient(circle,rgba(0,255,136,.1) 0%,transparent 70%);top:15%;left:50%;transform:translateX(-50%);pointer-events:none}
-.hero-badge{display:inline-flex;align-items:center;gap:.5rem;background:rgba(0,255,136,.08);border:1px solid rgba(0,255,136,.25);color:var(--green);padding:.35rem 1rem;border-radius:100px;font-size:.75rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:2rem}
-.pulse{width:7px;height:7px;background:var(--green);border-radius:50%;animation:blink 2s infinite}
-@keyframes blink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
-h1{font-size:clamp(2.5rem,8vw,5.5rem);font-weight:900;letter-spacing:-3px;line-height:1;margin-bottom:1.5rem;background:linear-gradient(135deg,#fff 0%,#bbb 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-h1 em{font-style:normal;background:linear-gradient(135deg,var(--green) 0%,#00cc70 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.hero-sub{font-size:1.2rem;color:var(--dim);max-width:540px;margin:0 auto 2.5rem;line-height:1.75}
-.cta-row{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap}
-.btn-green{background:var(--green);color:#000;border:none;padding:.9rem 2rem;border-radius:8px;font-size:1rem;font-weight:700;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:.5rem;transition:all .2s;box-shadow:0 0 30px rgba(0,255,136,.3)}
-.btn-green:hover{transform:translateY(-2px);box-shadow:0 0 55px rgba(0,255,136,.5)}
-.btn-outline{background:transparent;color:var(--text);border:1px solid var(--border);padding:.9rem 2rem;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:.5rem;transition:all .2s}
-.btn-outline:hover{border-color:rgba(255,255,255,.3);background:rgba(255,255,255,.05)}
+main{max-width:1440px;margin:0 auto;padding:24px 24px 60px}
 
-.sec{padding:7rem 2rem;max-width:1200px;margin:0 auto}
-.sec-head{text-align:center;margin-bottom:4rem}
-.sec-label{color:var(--green);font-size:.75rem;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:.875rem}
-.sec-title{font-size:clamp(1.75rem,5vw,3rem);font-weight:800;letter-spacing:-1.5px;margin-bottom:1rem;line-height:1.1}
-.sec-desc{color:var(--dim);font-size:1.1rem;max-width:480px;margin:0 auto;line-height:1.75}
+.stats-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 20px}
+.stat-label{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.stat-value{font-size:28px;font-weight:800;letter-spacing:-1px;line-height:1}
+.sv-accent{color:var(--accent)}
+.sv-green{color:var(--green)}
+.sv-amber{color:var(--amber)}
+.stat-sub{font-size:12px;color:var(--muted);margin-top:4px}
 
-.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1.25rem;margin-bottom:3.5rem}
-.feat-card{background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:16px;padding:1.875rem;transition:all .3s}
-.feat-card:hover{border-color:rgba(0,255,136,.35);transform:translateY(-5px)}
-.feat-icon{font-size:2rem;margin-bottom:1.25rem;display:block}
-.feat-card h3{font-size:1.0625rem;font-weight:700;margin-bottom:.625rem}
-.feat-card p{color:var(--dim);font-size:.9rem;line-height:1.65}
+.controls-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.filter-tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tab-btn{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 13px;font-size:13px;font-weight:500;color:var(--muted);cursor:pointer;transition:all 0.15s;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-family:inherit}
+.tab-btn:hover{border-color:var(--border-h);color:var(--text)}
+.tab-btn.active{background:var(--accent-dim);border-color:rgba(129,140,248,0.4);color:var(--accent)}
+.tab-count{background:rgba(255,255,255,0.08);border-radius:100px;padding:1px 7px;font-size:11px;font-weight:700;font-family:"JetBrains Mono",monospace}
+.tab-btn.active .tab-count{background:rgba(129,140,248,0.2)}
+.next-refresh{font-size:12px;color:var(--muted);font-family:"JetBrains Mono",monospace}
 
-.demo-bg{background:rgba(255,255,255,.012);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:7rem 2rem}
-.demo-inner{max-width:1000px;margin:0 auto}
-.demo-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.25rem}
+.table-wrap{background:var(--surface);border:1px solid var(--border);border-radius:16px;overflow:hidden;overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:680px}
+thead tr{border-bottom:1px solid var(--border)}
+th{padding:12px 16px;text-align:left;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);white-space:nowrap;background:var(--surface2)}
+tbody tr{border-bottom:1px solid rgba(255,255,255,0.04);transition:filter 0.12s}
+tbody tr:last-child{border-bottom:none}
+tbody tr.row-yes{background:var(--row-yes)}
+tbody tr.row-no{background:var(--row-no)}
+tbody tr.row-neutral{background:var(--row-neutral)}
+tbody tr:hover{filter:brightness(1.18)}
+td{padding:11px 16px;vertical-align:middle}
 
-.tester-panel{background:#0d1117;border:1px solid rgba(255,255,255,.07);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
-.tester-hdr{display:flex;align-items:center;justify-content:space-between;padding:.7rem 1rem;background:rgba(255,255,255,.025);border-bottom:1px solid rgba(255,255,255,.06);gap:.75rem}
-.tester-hdr-left{display:flex;align-items:center;gap:.625rem;min-width:0}
-.method-badge{background:rgba(0,255,136,.12);color:var(--green);border:1px solid rgba(0,255,136,.3);padding:.15rem .5rem;border-radius:4px;font-size:.67rem;font-weight:800;letter-spacing:1px;font-family:'JetBrains Mono',monospace;flex-shrink:0}
-.tester-endpoint{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tester-status{font-size:.7rem;font-family:'JetBrains Mono',monospace;font-weight:700;white-space:nowrap;flex-shrink:0;letter-spacing:.5px}
-.status-ok{color:var(--green)}
-.status-err{color:#ff8080}
-.tester-body{padding:1.25rem;display:flex;flex-direction:column;gap:1rem;flex:1}
-.tester-label{display:block;font-size:.68rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);margin-bottom:.4rem}
-.key-input-row{display:flex;gap:.5rem}
-.key-input{flex:1;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:.6rem .875rem;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:.8rem;outline:none;transition:border-color .2s;min-width:0}
-.key-input:focus{border-color:rgba(0,255,136,.4)}
-.key-input::placeholder{color:rgba(255,255,255,.22)}
-.fetch-btn{background:var(--green);color:#000;border:none;border-radius:8px;padding:.85rem 1rem;font-size:.9375rem;font-weight:700;cursor:pointer;font-family:inherit;transition:all .25s;box-shadow:0 0 25px rgba(0,255,136,.2);width:100%;display:flex;align-items:center;justify-content:center;gap:.5rem}
-.fetch-btn:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 0 45px rgba(0,255,136,.45)}
-.fetch-btn:disabled{opacity:.55;cursor:not-allowed}
-.tester-meta{font-size:.76rem;color:var(--dim);min-height:1.1em;font-family:'JetBrains Mono',monospace}
-.spin{display:inline-block;animation:spin .7s linear infinite}
+.type-badge{display:inline-block;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:700;letter-spacing:0.3px;white-space:nowrap}
+.b-winner{background:rgba(129,140,248,0.12);color:var(--accent);border:1px solid rgba(129,140,248,0.22)}
+.b-2hw{background:rgba(167,139,250,0.1);color:#a78bfa;border:1px solid rgba(167,139,250,0.2)}
+.b-total{background:rgba(251,191,36,0.1);color:var(--amber);border:1px solid rgba(251,191,36,0.2)}
+.b-spread{background:rgba(56,189,248,0.1);color:#38bdf8;border:1px solid rgba(56,189,248,0.2)}
+.b-other{background:rgba(255,255,255,0.05);color:var(--muted);border:1px solid var(--border)}
+
+.title-cell{max-width:300px}
+.title-main{font-weight:500;color:var(--text);line-height:1.35;word-break:break-word}
+.title-teams{font-size:11px;color:var(--muted);margin-top:2px}
+
+.pred-pill{display:inline-flex;align-items:center;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700}
+.pred-yes{background:rgba(74,222,128,0.14);color:var(--green);border:1px solid rgba(74,222,128,0.24)}
+.pred-no{background:rgba(248,113,113,0.14);color:var(--red);border:1px solid rgba(248,113,113,0.24)}
+
+.conf-wrap{display:flex;align-items:center;gap:8px;min-width:100px}
+.conf-bar{flex:1;height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;max-width:54px}
+.conf-fill{height:100%;border-radius:2px}
+.conf-pct{font-size:13px;font-weight:700;font-family:"JetBrains Mono",monospace;min-width:36px}
+
+.edge-pos{color:var(--green);font-weight:600;font-family:"JetBrains Mono",monospace;font-size:13px}
+.edge-neg{color:var(--red);font-weight:600;font-family:"JetBrains Mono",monospace;font-size:13px}
+.edge-nil{color:var(--muted);font-family:"JetBrains Mono",monospace;font-size:13px}
+
+.price-val{font-family:"JetBrains Mono",monospace;font-size:13px}
+
+.method-ml{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:0.5px;background:rgba(129,140,248,0.12);color:var(--accent)}
+.method-base{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:0.5px;background:rgba(255,255,255,0.05);color:var(--muted)}
+
+.empty-state{text-align:center;padding:60px 24px;color:var(--muted)}
+.empty-icon{font-size:40px;margin-bottom:12px;opacity:0.35}
+.empty-title{font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px}
+.empty-sub{font-size:13px;color:var(--muted);margin-top:6px}
+
+footer{border-top:1px solid var(--border);padding:20px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;max-width:1440px;margin:0 auto}
+.f-items{display:flex;gap:20px;flex-wrap:wrap}
+.f-item{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+.f-dot{width:5px;height:5px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.f-dot.on{background:var(--green)}
+.f-val{color:var(--text);font-weight:600;font-family:"JetBrains Mono",monospace;font-size:12px}
+.f-links{display:flex;gap:16px}
+.f-links a{font-size:12px;color:var(--muted);text-decoration:none;transition:color 0.15s}
+.f-links a:hover{color:var(--text)}
+.f-links a.hi{color:var(--accent)}
+
+#loading{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:100;transition:opacity 0.35s}
+#loading.gone{opacity:0;pointer-events:none}
+.spinner{width:32px;height:32px;border:3px solid rgba(129,140,248,0.2);border-top-color:var(--accent);border-radius:50%;animation:spin 0.75s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-.odds-panel{background:#0d1117;border:1px solid rgba(255,255,255,.07);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
-.odds-panel-hdr{display:flex;align-items:center;justify-content:space-between;padding:.7rem 1rem;background:rgba(255,255,255,.025);border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
-.live-label{display:inline-flex;align-items:center;gap:.35rem;color:var(--green);font-size:.7rem;font-family:'JetBrains Mono',monospace;font-weight:700;letter-spacing:1px}
-.code-lang{font-size:.7rem;color:var(--dim);font-weight:700;letter-spacing:1.5px;text-transform:uppercase}
-.markets-list{padding:.875rem;display:flex;flex-direction:column;gap:.625rem;overflow-y:auto;max-height:420px}
-.market-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:.875rem 1rem;transition:border-color .2s}
-.market-card:hover{border-color:rgba(0,255,136,.25)}
-.market-title{font-size:.85rem;font-weight:600;color:var(--text);margin-bottom:.625rem;line-height:1.4}
-.market-prices{display:flex;gap:.5rem}
-.price-pill{flex:1;background:rgba(255,255,255,.04);border-radius:6px;padding:.4rem .6rem;text-align:center}
-.price-lbl{font-size:.62rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--green);margin-bottom:.2rem}
-.price-val{font-size:.9rem;font-weight:700;font-family:'JetBrains Mono',monospace}
-.price-vol{font-size:.7rem;color:var(--dim);font-family:'JetBrains Mono',monospace}
-.odds-loading{padding:2rem;text-align:center;color:var(--dim);font-size:.875rem}
-
-.price-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.5rem;max-width:780px;margin:0 auto}
-.price-card{background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:20px;padding:2.5rem;transition:transform .3s}
-.price-card:hover{transform:translateY(-5px)}
-.price-card.hot{background:rgba(0,255,136,.05);border-color:rgba(0,255,136,.4);position:relative;box-shadow:0 0 70px rgba(0,255,136,.1)}
-.hot-badge{position:absolute;top:-13px;left:50%;transform:translateX(-50%);background:var(--green);color:#000;padding:.25rem 1rem;border-radius:100px;font-size:.7rem;font-weight:800;letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
-.plan-name{font-size:.75rem;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--dim);margin-bottom:1.25rem}
-.price-card.hot .plan-name{color:var(--green)}
-.price-amt{font-size:3.75rem;font-weight:900;letter-spacing:-2px;line-height:1;margin-bottom:.25rem}
-.price-per{color:var(--dim);font-size:.875rem;margin-bottom:2rem}
-.feat-list{list-style:none;margin-bottom:2rem}
-.feat-list li{display:flex;align-items:center;gap:.75rem;padding:.575rem 0;border-bottom:1px solid var(--border);font-size:.9125rem;color:var(--dim)}
-.feat-list li:last-child{border-bottom:none}
-.chk{color:var(--green);font-size:.9rem;flex-shrink:0;font-weight:700}
-.btn-plan{width:100%;padding:.875rem;border-radius:8px;font-size:.9375rem;font-weight:700;cursor:pointer;transition:all .2s;font-family:inherit;text-align:center;text-decoration:none;display:block}
-.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
-.btn-ghost:hover{border-color:rgba(255,255,255,.3);background:rgba(255,255,255,.05)}
-.btn-solid{background:var(--green);border:none;color:#000;box-shadow:0 0 30px rgba(0,255,136,.3)}
-.btn-solid:hover{transform:translateY(-2px);box-shadow:0 0 55px rgba(0,255,136,.5)}
-
-footer{border-top:1px solid var(--border);padding:2.5rem 2rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;max-width:1200px;margin:0 auto}
-.ft-links{display:flex;gap:2rem}
-.ft-links a{color:var(--dim);text-decoration:none;font-size:.875rem;transition:color .2s}
-.ft-links a:hover{color:var(--text)}
-.ft-copy{color:var(--dim);font-size:.875rem}
-
-.fade-up{opacity:0;transform:translateY(28px);transition:opacity .65s ease,transform .65s ease}
-.fade-up.in{opacity:1;transform:translateY(0)}
-
-@media(max-width:768px){.demo-grid{grid-template-columns:1fr}.nav-links{display:none}footer{flex-direction:column;text-align:center}.ft-links{justify-content:center}}
-::-webkit-scrollbar{width:6px;height:6px}
-::-webkit-scrollbar-track{background:var(--bg)}
-::-webkit-scrollbar-thumb{background:#2a2a2a;border-radius:3px}
+@media(max-width:900px){.stats-bar{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.stats-bar{grid-template-columns:1fr 1fr};header{padding:10px 14px};main{padding:14px 14px 40px};.header-subtitle{display:none};.stat-value{font-size:22px}}
+::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:#1e1e30;border-radius:3px}
 </style>
 </head>
 <body>
 
-<nav>
-  <a href="/" class="logo">&#9889; OddsAPI</a>
-  <div class="nav-links">
-    <a href="#features">Features</a>
-    <a href="#demo">Demo</a>
-    <a href="#pricing">Pricing</a>
-    <a href="/docs">Docs</a>
-    <a href="#pricing" class="nav-cta">Get API Key</a>
-  </div>
-</nav>
+<div id="loading"><div class="spinner"></div></div>
 
-<div class="hero">
-  <div class="hero-glow"></div>
-  <div class="hero-badge"><span class="pulse"></span>Live Data &bull; Updated Every 60 Seconds</div>
-  <h1>NBA Prediction<br><em>Markets API</em></h1>
-  <p class="hero-sub">Real-time Kalshi NBA prediction market data for developers. Yes/No prices, volume, and open interest&mdash;delivered in milliseconds.</p>
-  <div class="cta-row">
-    <a href="#pricing" class="btn-green">&#128640; Get Free API Key</a>
-    <a href="/docs" class="btn-outline">&#128196; View Docs &rarr;</a>
+<header>
+  <div class="header-left">
+    <h1>NBA <span>Prediction Engine</span></h1>
+    <div class="header-subtitle" id="last-updated">Loading&hellip;</div>
   </div>
-</div>
+  <div class="header-right">
+    <div class="counter-chip" id="pred-count">—</div>
+    <div class="live-badge">
+      <span class="dot-live"></span>
+      <span id="live-status">connecting&hellip;</span>
+    </div>
+  </div>
+</header>
 
-<section class="sec" id="features">
-  <div class="sec-head fade-up">
-    <div class="sec-label">Why Choose Us</div>
-    <h2 class="sec-title">Kalshi NBA markets,<br>ready to query</h2>
-    <p class="sec-desc">Clean REST API over Kalshi&rsquo;s KXNBA series, refreshed every 60 seconds.</p>
-  </div>
-  <div class="feat-grid">
-    <div class="feat-card fade-up">
-      <span class="feat-icon">&#9889;</span>
-      <h3>Live Markets</h3>
-      <p>All open KXNBA prediction markets from Kalshi, refreshed every 60 seconds with current yes/no prices.</p>
+<main>
+  <div class="stats-bar">
+    <div class="stat-card">
+      <div class="stat-label">Active Markets</div>
+      <div class="stat-value sv-accent" id="s-markets">—</div>
+      <div class="stat-sub">predictions tracked</div>
     </div>
-    <div class="feat-card fade-up">
-      <span class="feat-icon">&#128200;</span>
-      <h3>Yes &amp; No Prices</h3>
-      <p>Ask prices for both sides of every market, plus volume and open interest for liquidity analysis.</p>
+    <div class="stat-card">
+      <div class="stat-label">Market Types</div>
+      <div class="stat-value" id="s-types">—</div>
+      <div class="stat-sub" id="s-types-sub">categories</div>
     </div>
-    <div class="feat-card fade-up">
-      <span class="feat-icon">&#128640;</span>
-      <h3>Fast Response</h3>
-      <p>Sub-100ms API responses served from global infrastructure. Simple JSON format, easy to integrate.</p>
+    <div class="stat-card">
+      <div class="stat-label">Overall Accuracy</div>
+      <div class="stat-value sv-green" id="s-acc">—</div>
+      <div class="stat-sub" id="s-acc-sub">resolved markets</div>
     </div>
-    <div class="feat-card fade-up">
-      <span class="feat-icon">&#128274;</span>
-      <h3>Reliable Uptime</h3>
-      <p>99.9% uptime with health monitoring and automatic restarts. Built on Railway.</p>
+    <div class="stat-card">
+      <div class="stat-label">Edge Accuracy</div>
+      <div class="stat-value sv-amber" id="s-edge">—</div>
+      <div class="stat-sub" id="s-edge-sub">positive-edge calls</div>
     </div>
   </div>
-</section>
 
-<div class="demo-bg" id="demo">
-  <div class="demo-inner">
-    <div class="sec-head fade-up">
-      <div class="sec-label">Live Demo</div>
-      <h2 class="sec-title">Try it right now</h2>
-      <p class="sec-desc">Enter your API key and fetch live Kalshi NBA markets.</p>
-    </div>
-    <div class="demo-grid fade-up">
-      <div class="tester-panel">
-        <div class="tester-hdr">
-          <div class="tester-hdr-left">
-            <span class="method-badge">GET</span>
-            <span class="tester-endpoint">/odds/nba/kalshi</span>
-          </div>
-          <span class="tester-status" id="tester-status"></span>
-        </div>
-        <div class="tester-body">
-          <div>
-            <label class="tester-label" for="api-key-input">X-API-Key</label>
-            <div class="key-input-row">
-              <input type="text" id="api-key-input" class="key-input" placeholder="Paste your API key&hellip;" autocomplete="off" spellcheck="false">
-            </div>
-          </div>
-          <button class="fetch-btn" id="fetch-btn" onclick="fetchMarkets()">
-            <span id="fetch-label">&#9889; Fetch Live Markets</span>
-          </button>
-          <div class="tester-meta" id="tester-meta"></div>
-        </div>
-      </div>
-      <div class="odds-panel">
-        <div class="odds-panel-hdr">
-          <span class="code-lang">Live Response</span>
-          <span class="live-label"><span class="pulse"></span>LIVE</span>
-        </div>
-        <div class="markets-list" id="markets-list">
-          <div class="odds-loading">Enter your API key and click Fetch.</div>
-        </div>
-      </div>
-    </div>
+  <div class="controls-bar">
+    <div class="filter-tabs" id="filter-tabs"></div>
+    <div class="next-refresh" id="next-refresh"></div>
   </div>
-</div>
 
-<section class="sec" id="pricing">
-  <div class="sec-head fade-up">
-    <div class="sec-label">Pricing</div>
-    <h2 class="sec-title">Simple, transparent pricing</h2>
-    <p class="sec-desc">Start free, scale when you need it.</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Market</th>
+          <th>Call</th>
+          <th>Confidence</th>
+          <th>Edge</th>
+          <th>Kalshi</th>
+          <th>Method</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
   </div>
-  <div class="price-grid fade-up">
-    <div class="price-card">
-      <div class="plan-name">Free</div>
-      <div class="price-amt">$0</div>
-      <div class="price-per">forever &mdash; no credit card</div>
-      <ul class="feat-list">
-        <li><span class="chk">&#10003;</span> 100 requests / day</li>
-        <li><span class="chk">&#10003;</span> Kalshi NBA markets</li>
-        <li><span class="chk">&#10003;</span> Yes/No prices &amp; volume</li>
-        <li><span class="chk">&#10003;</span> JSON REST API</li>
-        <li><span class="chk">&#10003;</span> Basic email support</li>
-      </ul>
-      <a href="mailto:jbraid061@gmail.com?subject=Free API Key Request" class="btn-plan btn-ghost">Get Started Free</a>
-    </div>
-    <div class="price-card hot">
-      <div class="hot-badge">&#9889; Most Popular</div>
-      <div class="plan-name">Pro</div>
-      <div class="price-amt">$29</div>
-      <div class="price-per">per month &mdash; cancel anytime</div>
-      <ul class="feat-list">
-        <li><span class="chk">&#10003;</span> 10,000 requests / day</li>
-        <li><span class="chk">&#10003;</span> All Kalshi NBA markets</li>
-        <li><span class="chk">&#10003;</span> Yes/No prices &amp; volume</li>
-        <li><span class="chk">&#10003;</span> Open interest data</li>
-        <li><span class="chk">&#10003;</span> Priority support &amp; SLA</li>
-      </ul>
-      <a href="mailto:jbraid061@gmail.com?subject=Pro API Key Request" class="btn-plan btn-solid">Get Pro Access &rarr;</a>
-    </div>
-  </div>
-</section>
+</main>
 
 <footer>
-  <a href="/" class="logo">&#9889; OddsAPI</a>
-  <div class="ft-links">
-    <a href="/docs">Documentation</a>
-    <a href="/health">Health</a>
-    <a href="mailto:jbraid061@gmail.com">Contact</a>
+  <div class="f-items">
+    <div class="f-item"><span class="f-dot" id="fd-cache"></span>Cache&nbsp;<span class="f-val" id="f-cache">—</span>&nbsp;games</div>
+    <div class="f-item"><span class="f-dot"></span>Last scrape&nbsp;<span class="f-val" id="f-scrape">—</span></div>
+    <div class="f-item"><span class="f-dot" id="fd-proxy"></span>Proxy&nbsp;<span class="f-val" id="f-proxy">—</span></div>
   </div>
-  <div class="ft-copy">&copy; 2026 OddsAPI. All rights reserved.</div>
+  <div class="f-links">
+    <a href="/dashboard" class="hi">Kalshi Markets</a>
+    <a href="/docs">API Docs</a>
+    <a href="/health">Health</a>
+  </div>
 </footer>
 
 <script>
-async function fetchMarkets() {
-  const key = document.getElementById('api-key-input').value.trim();
-  if (!key) { alert('Please enter your API key.'); return; }
+const LABELS = {winner:"Winner","2h_winner":"2H Winner",series_spread:"Series Spread",spread:"Spread",total:"Total",team_total:"Team Total",reb_assists:"Reb+Ast",blocks:"Blocks",steals:"Steals",triple_double:"Triple-Dbl"};
+const BADGE  = {winner:"b-winner","2h_winner":"b-2hw",series_spread:"b-spread",spread:"b-spread",total:"b-total",team_total:"b-total"};
+const TABS = [
+  {k:"all",l:"All"},
+  {k:"winner",l:"Winner"},
+  {k:"2h_winner",l:"2H Winner"},
+  {k:"spread",l:"Spread"},
+  {k:"total",l:"Total"},
+  {k:"team_total",l:"Team Total"},
+  {k:"series_spread",l:"Series Spread"},
+  {k:"steals",l:"Steals"},
+  {k:"blocks",l:"Blocks"},
+  {k:"triple_double",l:"Triple-Dbl"},
+];
 
-  const btn = document.getElementById('fetch-btn');
-  const lbl = document.getElementById('fetch-label');
-  const statusEl = document.getElementById('tester-status');
-  const metaEl = document.getElementById('tester-meta');
-  const listEl = document.getElementById('markets-list');
+let preds = [], activeFilter = "all", countdown = 30, cdTimer = null, refreshTimer = null;
 
-  btn.disabled = true;
-  lbl.innerHTML = '<span class="spin">&#9696;</span> Fetching&hellip;';
-  listEl.innerHTML = '<div class="odds-loading">Fetching live markets&hellip;</div>';
-  statusEl.className = 'tester-status';
-  statusEl.textContent = '';
-  metaEl.textContent = '';
+const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 
-  const t0 = performance.now();
+function fmtAge(iso) {
+  if (!iso) return "—";
   try {
-    const r = await fetch('/odds/nba/kalshi', { headers: { 'X-API-Key': key } });
-    const ms = Math.round(performance.now() - t0);
-    const data = await r.json();
-    if (r.ok) {
-      statusEl.className = 'tester-status status-ok';
-      statusEl.textContent = r.status + ' OK';
-      const markets = data.markets || [];
-      metaEl.textContent = 'Responded in ' + ms + 'ms · ' + markets.length + ' market' + (markets.length !== 1 ? 's' : '');
-      renderMarkets(markets);
-    } else {
-      statusEl.className = 'tester-status status-err';
-      statusEl.textContent = r.status + ' Error';
-      metaEl.textContent = data.detail || 'Request failed';
-      listEl.innerHTML = '<div class="odds-loading">' + (data.detail || 'Error fetching markets.') + '</div>';
-    }
-  } catch (_) {
-    statusEl.className = 'tester-status status-err';
-    statusEl.textContent = 'Network Error';
-    metaEl.textContent = 'Could not reach the API';
-    listEl.innerHTML = '<div class="odds-loading">Network error — check your connection.</div>';
+    const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 5)    return "just now";
+    if (s < 60)   return s + "s ago";
+    if (s < 3600) return Math.floor(s/60) + "m ago";
+    return Math.floor(s/3600) + "h ago";
+  } catch(e) { return "—"; }
+}
+
+function confColor(c) {
+  if (c >= 75) return "#4ade80";
+  if (c >= 65) return "#6ee7b7";
+  if (c >= 55) return "#fbbf24";
+  return "#94a3b8";
+}
+
+function rowCls(p) {
+  const c = p.confidence || 50;
+  if (c <= 65) return "row-neutral";
+  return p.prediction === "YES" ? "row-yes" : "row-no";
+}
+
+function edgeHtml(e) {
+  if (e == null) return "<span class='edge-nil'>—</span>";
+  const pp = (e * 100).toFixed(1);
+  if (e >  0.005) return "<span class='edge-pos'>+" + pp + "pp</span>";
+  if (e < -0.005) return "<span class='edge-neg'>" + pp + "pp</span>";
+  return "<span class='edge-nil'>~0</span>";
+}
+
+function renderRow(p) {
+  const mtype = p.market_type || "";
+  const badge = BADGE[mtype] || "b-other";
+  const label = LABELS[mtype] || mtype;
+  const conf  = p.confidence || 50;
+  const cc    = confColor(conf);
+  const teams = (p.yes_team && p.no_team) ? esc(p.yes_team) + " vs " + esc(p.no_team) : "";
+  const price = p.yes_ask != null ? Math.round(parseFloat(p.yes_ask) * 100) + "&cent;" : "—";
+  const mHtml = p.method === "ml_model"
+    ? "<span class='method-ml'>ML</span>"
+    : "<span class='method-base'>BASE</span>";
+  return "<tr class='" + rowCls(p) + "'>"
+    + "<td><span class='type-badge " + badge + "'>" + label + "</span></td>"
+    + "<td class='title-cell'><div class='title-main'>" + esc(p.title||"—") + "</div>"
+    + (teams ? "<div class='title-teams'>" + teams + "</div>" : "") + "</td>"
+    + "<td><span class='pred-pill " + (p.prediction==="YES"?"pred-yes":"pred-no") + "'>" + esc(p.prediction||"—") + "</span></td>"
+    + "<td><div class='conf-wrap'><div class='conf-bar'><div class='conf-fill' style='width:" + Math.min(100,conf) + "%;background:" + cc + "'></div></div>"
+    + "<span class='conf-pct' style='color:" + cc + "'>" + conf.toFixed(0) + "%</span></div></td>"
+    + "<td>" + edgeHtml(p.edge) + "</td>"
+    + "<td><span class='price-val'>" + price + "</span></td>"
+    + "<td>" + mHtml + "</td>"
+    + "</tr>";
+}
+
+function buildFilters(byType) {
+  document.getElementById("filter-tabs").innerHTML = TABS.map(function(t) {
+    const cnt = t.k === "all" ? preds.length : (byType[t.k] || 0);
+    if (t.k !== "all" && cnt === 0) return "";
+    return "<button class='tab-btn" + (activeFilter===t.k?" active":"") + "' onclick='setFilter("" + t.k + "")'>"
+      + t.l + "<span class='tab-count'>" + cnt + "</span></button>";
+  }).join("");
+}
+
+function buildTable() {
+  const rows = activeFilter === "all" ? preds : preds.filter(function(p){ return p.market_type === activeFilter; });
+  if (!rows.length) {
+    document.getElementById("tbody").innerHTML =
+      "<tr><td colspan='7' style='padding:0'><div class='empty-state'>"
+      + "<div class='empty-icon'>&#128202;</div>"
+      + "<div class='empty-title'>" + (activeFilter==="all" ? "No predictions yet" : "No predictions for this type") + "</div>"
+      + "<div class='empty-sub'>Waiting for the predictor to run&hellip;</div></div></td></tr>";
+    return;
   }
-  btn.disabled = false;
-  lbl.innerHTML = '&#9889; Fetch Live Markets';
+  document.getElementById("tbody").innerHTML = rows.map(renderRow).join("");
 }
 
-function renderMarkets(markets) {
-  const el = document.getElementById('markets-list');
-  if (!markets.length) { el.innerHTML = '<div class="odds-loading">No open markets found.</div>'; return; }
-  const fmt = v => v == null ? 'N/A' : v + '¢';
-  const fmtVol = v => v == null ? '' : 'Vol: ' + v.toLocaleString();
-  el.innerHTML = markets.map(m => `<div class="market-card">
-  <div class="market-title">${m.title || m.ticker || '—'}</div>
-  <div class="market-prices">
-    <div class="price-pill"><div class="price-lbl">Yes</div><div class="price-val">${fmt(m.yes_price)}</div></div>
-    <div class="price-pill"><div class="price-lbl">No</div><div class="price-val">${fmt(m.no_price)}</div></div>
-    <div class="price-pill" style="flex:1.5"><div class="price-lbl">Volume</div><div class="price-vol">${fmtVol(m.volume)}</div></div>
-  </div>
-</div>`).join('');
+function setFilter(k) {
+  activeFilter = k;
+  const byType = {};
+  preds.forEach(function(p){ byType[p.market_type] = (byType[p.market_type]||0)+1; });
+  buildFilters(byType);
+  buildTable();
 }
 
-const obs = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); obs.unobserve(e.target); } }), { threshold: .1 });
-document.querySelectorAll('.fade-up').forEach(el => obs.observe(el));
+async function fetchData() {
+  try {
+    const r = await fetch("/api/predictions");
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+
+    preds = d.predictions || [];
+
+    document.getElementById("last-updated").textContent = d.generated_at ? "Updated " + fmtAge(d.generated_at) : "Awaiting first run";
+    document.getElementById("pred-count").textContent = preds.length + (preds.length===1?" prediction":" predictions");
+
+    document.getElementById("s-markets").textContent = d.count || "—";
+    const bt = d.by_type || {};
+    const tc = Object.keys(bt).length;
+    document.getElementById("s-types").textContent    = tc || "—";
+    document.getElementById("s-types-sub").textContent = tc + " market type" + (tc!==1?"s":"");
+
+    const acc = d.accuracy;
+    if (acc && acc.accuracy_pct != null) {
+      document.getElementById("s-acc").textContent     = acc.accuracy_pct.toFixed(1) + "%";
+      document.getElementById("s-acc-sub").textContent = acc.correct + "/" + acc.total + " correct";
+    } else {
+      document.getElementById("s-acc").textContent     = "—";
+      document.getElementById("s-acc-sub").textContent = "no history yet";
+    }
+    if (acc && acc.edge_accuracy_pct != null) {
+      document.getElementById("s-edge").textContent     = acc.edge_accuracy_pct.toFixed(1) + "%";
+      document.getElementById("s-edge-sub").textContent = (acc.positive_edge_total||0) + " edge call" + ((acc.positive_edge_total||0)!==1?"s":"");
+    } else {
+      document.getElementById("s-edge").textContent     = "—";
+      document.getElementById("s-edge-sub").textContent = "no edge data yet";
+    }
+
+    buildFilters(bt);
+    buildTable();
+
+    const sys = d.system || {};
+    document.getElementById("f-cache").textContent  = sys.cache_size || "0";
+    document.getElementById("f-scrape").textContent = sys.last_scrape ? fmtAge(sys.last_scrape) : "—";
+    document.getElementById("f-proxy").textContent  = sys.proxy_configured ? "configured" : "direct";
+    document.getElementById("fd-proxy").className   = "f-dot" + (sys.proxy_configured ? " on" : "");
+    document.getElementById("fd-cache").className   = "f-dot" + ((sys.cache_size||0)>0 ? " on" : "");
+
+    document.getElementById("live-status").textContent = "live";
+    document.getElementById("loading").classList.add("gone");
+  } catch(e) {
+    console.error("fetchData error:", e);
+    document.getElementById("live-status").textContent = "error";
+    document.getElementById("loading").classList.add("gone");
+  }
+}
+
+function startCountdown() {
+  if (cdTimer) clearInterval(cdTimer);
+  countdown = 30;
+  var el = document.getElementById("next-refresh");
+  var tick = function() {
+    el.textContent = "refresh in " + countdown + "s";
+    if (countdown > 0) countdown--;
+  };
+  tick();
+  cdTimer = setInterval(tick, 1000);
+}
+
+function scheduleRefresh() {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async function() {
+    document.getElementById("live-status").textContent = "refreshing…";
+    await fetchData();
+    startCountdown();
+    scheduleRefresh();
+  }, 30000);
+}
+
+fetchData().then(function() { startCountdown(); scheduleRefresh(); });
 </script>
 </body>
-</html>"""
+</html>
+"""
