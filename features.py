@@ -243,8 +243,11 @@ def build_features(
     t2_off      = _pick(t2, "e_off_rating", "off_rtg", default=110.0)
     t1_def      = _pick(t1, "e_def_rating", "def_rtg", default=110.0)
     t2_def      = _pick(t2, "e_def_rating", "def_rtg", default=110.0)
-    t1_net      = _pick(t1, "e_net_rating", "net_rtg", default=0.0)
-    t2_net      = _pick(t2, "e_net_rating", "net_rtg", default=0.0)
+    # e_net_rating is null in the live stats feed; fall back to pts - opp_pts
+    _t1_net_raw = t1.get("e_net_rating") if t1.get("e_net_rating") is not None else t1.get("net_rtg")
+    _t2_net_raw = t2.get("e_net_rating") if t2.get("e_net_rating") is not None else t2.get("net_rtg")
+    t1_net = safe(_t1_net_raw) if _t1_net_raw is not None else (t1_pts - t1_opp_pts)
+    t2_net = safe(_t2_net_raw) if _t2_net_raw is not None else (t2_pts - t2_opp_pts)
     t1_pace     = _pick(t1, "e_pace", "pace", default=100.0)
     t2_pace     = _pick(t2, "e_pace", "pace", default=100.0)
 

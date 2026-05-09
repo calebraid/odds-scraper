@@ -4,7 +4,10 @@ import os
 import re as _re
 from datetime import datetime, timezone
 
-from features import build_features, _load_teams, _load_recent, _load_players, find_team
+from features import (
+    build_features, _load_teams, _load_recent, _load_players, find_team,
+    _load_today_games, _parse_record, _determine_home_away,
+)
 from model import predict
 
 ODDS_DIR = "odds"
@@ -17,11 +20,17 @@ _WINNER_TITLE_RE = _re.compile(r"Will (?:the )?(.+?) win\?", _re.IGNORECASE)
 
 
 def _direct_winner(market: dict, teams: list[dict]) -> dict | None:
-    """Formula-based winner prediction for when the feature pipeline can't resolve both teams.
+    """Multi-factor winner prediction used when the full feature pipeline can't resolve both teams.
 
-    Parses the YES-team from the market title when yes_team is absent, then uses:
-        win_prob = 0.5 + (t1_net_rtg - t2_net_rtg) * 0.033   capped [0.1, 0.9]
+    Six-step formula using all available team_stats.json fields.
+    Net rating proxy = pts - opp_pts (e_net_rating is null in live stats feed).
     """
+    def _sf(v, d=0.0):
+        try:
+            return float(v) if v is not None else d
+        except (TypeError, ValueError):
+            return d
+
     yes_name = market.get("yes_team") or ""
     no_name  = market.get("no_team") or ""
 
@@ -30,46 +39,120 @@ def _direct_winner(market: dict, teams: list[dict]) -> dict | None:
         yes_name = hit.group(1).strip() if hit else ""
 
     t1 = find_team(yes_name, teams) if yes_name else None
-    t2 = find_team(no_name, teams)  if no_name  else None
-
-    if not t1:
+    if t1:
+        print(f"  [winner] '{yes_name}' matched to {t1.get('team_name')} "
+              f"(win_pct={t1.get('win_pct')})")
+    else:
+        print(f"  [winner] WARNING: no team match for '{yes_name}'")
         return None
 
-    def _sf(v, d=0.0):
-        try:
-            return float(v) if v is not None else d
-        except (TypeError, ValueError):
-            return d
+    # When no_team is missing, infer opponent from today's schedule
+    today_games = _load_today_games()
+    if not no_name and today_games:
+        t1_id   = t1.get("team_id")
+        t1_abbr = (t1.get("abbreviation") or "").upper()
+        for game in today_games:
+            h_id   = game.get("home_team_id")
+            a_id   = game.get("away_team_id")
+            h_abbr = (game.get("home_team_abbrev") or "").upper()
+            a_abbr = (game.get("away_team_abbrev") or "").upper()
+            if (t1_id and t1_id == h_id) or (t1_abbr and t1_abbr == h_abbr):
+                no_name = game.get("away_team_name") or a_abbr
+                break
+            if (t1_id and t1_id == a_id) or (t1_abbr and t1_abbr == a_abbr):
+                no_name = game.get("home_team_name") or h_abbr
+                break
+        if no_name:
+            print(f"  [winner] opponent inferred from schedule: '{no_name}'")
 
-    t1_net = _sf(t1.get("e_net_rating") or t1.get("net_rtg"))
-    t2_net = _sf(t2.get("e_net_rating") or t2.get("net_rtg")) if t2 else 0.0
+    t2 = find_team(no_name, teams) if no_name else None
+    if t2:
+        print(f"  [winner] '{no_name}' matched to {t2.get('team_name')} "
+              f"(win_pct={t2.get('win_pct')})")
+    elif no_name:
+        print(f"  [winner] WARNING: no team match for opponent '{no_name}'")
 
-    net_diff = t1_net - t2_net
-    win_prob = max(0.1, min(0.9, 0.5 + net_diff * 0.033))
-    yes_ask  = _sf(market.get("yes_ask"), 0.5)
-    edge     = round(win_prob - yes_ask, 3)
+    # --- Step 1: Base probability from scoring differential (net rating proxy) ---
+    t1_pts     = _sf(t1.get("pts"), 110.0)
+    t1_opp_pts = _sf(t1.get("opp_pts"), 110.0)
+    t2_pts     = _sf(t2.get("pts"), 110.0)     if t2 else 110.0
+    t2_opp_pts = _sf(t2.get("opp_pts"), 110.0) if t2 else 110.0
 
-    prediction = "YES" if win_prob >= 0.5 else "NO"
-    raw_conf   = win_prob if prediction == "YES" else (1.0 - win_prob)
+    t1_net_proxy = t1_pts - t1_opp_pts
+    t2_net_proxy = t2_pts - t2_opp_pts
+    net_diff     = t1_net_proxy - t2_net_proxy
+    base_prob    = 0.5 + (net_diff * 0.033)
+
+    # --- Step 2: Win percentage adjustment ---
+    t1_win_pct  = _sf(t1.get("win_pct"), 0.5)
+    t2_win_pct  = _sf(t2.get("win_pct"), 0.5) if t2 else 0.5
+    win_pct_adj = (t1_win_pct - t2_win_pct) * 0.15
+
+    # --- Step 3: Recent form (last 10 games) ---
+    t1_last10  = _parse_record(t1.get("last_10"), 0.5)
+    t2_last10  = _parse_record(t2.get("last_10"), 0.5) if t2 else 0.5
+    form_adj   = (t1_last10 - t2_last10) * 0.10
+
+    # --- Step 4: Home court advantage ---
+    if t2:
+        home_val = _determine_home_away(t1, t2, today_games)
+    else:
+        home_val = 0.5
+    home_adj = 0.03 if home_val == 1.0 else (-0.03 if home_val == 0.0 else 0.0)
+
+    # --- Step 5: Scoring offense differential ---
+    scoring_adj = (t1_pts - t2_pts) * 0.008
+
+    # --- Step 6: Defensive efficiency differential ---
+    def_adj = (t2_opp_pts - t1_opp_pts) * 0.006
+
+    final_prob = max(0.05, min(0.95,
+        base_prob + win_pct_adj + form_adj + home_adj + scoring_adj + def_adj
+    ))
+
+    yes_ask = _sf(market.get("yes_ask"), 0.5)
+    edge    = round(final_prob - yes_ask, 3)
+
+    t1_label = t1.get("team_name") or yes_name
+    t2_label = (t2.get("team_name") if t2 else None) or no_name or "opponent"
+    venue    = "Home" if home_val == 1.0 else ("Away" if home_val == 0.0 else "Neutral")
+    print(
+        f"  [winner] {t1_label} vs {t2_label} ({venue}): "
+        f"net_diff={net_diff:+.1f} base={base_prob:.3f} "
+        f"win_pct={win_pct_adj:+.3f} form={form_adj:+.3f} "
+        f"home={home_adj:+.3f} scoring={scoring_adj:+.3f} def={def_adj:+.3f} "
+        f"final={final_prob:.3f} edge={edge:+.3f}"
+    )
+
+    prediction = "YES" if final_prob >= 0.5 else "NO"
+    raw_conf   = final_prob if prediction == "YES" else (1.0 - final_prob)
     confidence = round(min(95.0, max(51.0, raw_conf * 100)), 1)
 
-    t1_win_pct = _sf(t1.get("win_pct"), 0.5)
-    t2_win_pct = _sf(t2.get("win_pct"), 0.5) if t2 else 0.5
+    reasoning = (
+        f"Scoring diff {net_diff:+.1f} pts/g | "
+        f"Win% diff {t1_win_pct - t2_win_pct:+.1%} | "
+        f"Form diff {t1_last10 - t2_last10:+.1%} | "
+        f"{venue} ({home_adj:+.2f}) → {final_prob:.1%} win prob"
+    )
 
     return {
         "prediction": prediction,
         "confidence": confidence,
-        "reasoning":  f"Net Rtg diff {net_diff:+.1f} → {win_prob:.1%} win prob",
+        "reasoning":  reasoning,
         "method":     "formula",
         "features_snapshot": {
-            "t1_net_rtg":       round(t1_net, 2),
-            "t2_net_rtg":       round(t2_net, 2),
+            "t1_net_proxy":     round(t1_net_proxy, 2),
+            "t2_net_proxy":     round(t2_net_proxy, 2),
             "net_rtg_diff":     round(net_diff, 2),
             "win_pct_diff":     round(t1_win_pct - t2_win_pct, 3),
-            "our_win_prob":     round(win_prob, 3),
+            "t1_last10":        round(t1_last10, 3),
+            "t2_last10":        round(t2_last10, 3),
+            "form_diff":        round(t1_last10 - t2_last10, 3),
+            "home_adj":         home_adj,
+            "is_home_team":     home_val,
+            "our_win_prob":     round(final_prob, 3),
             "kalshi_yes_price": yes_ask,
             "edge":             edge,
-            "is_home_team":     0.5,
         },
     }
 
