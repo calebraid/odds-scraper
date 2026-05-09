@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p odds stats
+RUN mkdir -p /data
 
 EXPOSE 8000
 

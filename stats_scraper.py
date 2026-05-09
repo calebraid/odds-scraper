@@ -38,7 +38,7 @@ from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
 from nba_api.stats.static import teams as nba_teams  # static JSON, no HTTP call
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-STATS_DIR = "stats"
+STATS_DIR = os.getenv("STATS_DIR", "/data")
 CACHE_FILE = os.path.join(STATS_DIR, "boxscore_cache.json")
 REQUEST_TIMEOUT = 60
 PROXY = os.getenv("SCRAPER_PROXY", None)
@@ -439,6 +439,40 @@ def _team_entry_from_sb(t: dict) -> dict:
     }
 
 
+# ── Playoff cache backfill ────────────────────────────────────────────────────
+
+def _backfill_playoff_cache(cache: dict, limit: int = 60) -> int:
+    """Seed the cache with 2025 NBA playoff boxscores on first deploy.
+
+    Iterates game IDs 0042500101–0042500499 (format: 004250{round:02d}{game:02d}).
+    Skips IDs that error or are not yet Final. Stops once `limit` games cached.
+    """
+    cached = 0
+    for n in range(42500101, 42500500):
+        if cached >= limit:
+            break
+        game_id = f"{n:010d}"
+        if game_id in cache:
+            continue
+        try:
+            box = _fetch_boxscore(game_id)
+            if not box:
+                time.sleep(0.5)
+                continue
+            if box.get("gameStatus") != 3:
+                time.sleep(0.5)
+                continue
+            raw_ts = box.get("gameTimeUTC") or box.get("gameEt") or ""
+            game_date = raw_ts[:10] if len(raw_ts) >= 10 else datetime.utcnow().date().isoformat()
+            cache[game_id] = _build_cache_entry(game_id, game_date, box)
+            cached += 1
+            print(f"  backfill: {cached}/{limit} games cached")
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return cached
+
+
 # ── Main run logic ─────────────────────────────────────────────────────────────
 
 def run_once():
@@ -456,9 +490,15 @@ def run_once():
     except Exception as e:
         print(f"[stats] proxy test failed: {e}")
 
-    # ── 1. Load cache ──────────────────────────────────────────────────────────
+    # ── 1. Load cache (backfill on first deploy) ───────────────────────────────
     cache = _load_cache()
     print(f"  cache: {len(cache)} games stored")
+    if not cache:
+        print("  cache empty — running 2025 playoff backfill (up to 60 games)...")
+        n = _backfill_playoff_cache(cache, limit=60)
+        print(f"  backfill complete: {n} games added")
+        if cache:
+            _save_cache(cache)
 
     # ── 2. Scoreboard ──────────────────────────────────────────────────────────
     print("  fetching scoreboard (cdn.nba.com)...")
