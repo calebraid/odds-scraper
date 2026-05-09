@@ -3,8 +3,9 @@ import json
 import os
 from datetime import datetime, timezone
 
-ODDS_DIR = os.getenv("ODDS_DIR", "odds")
-STATS_DIR = os.getenv("STATS_DIR", "stats")
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+ODDS_DIR  = os.path.join(BASE_DIR, "odds")
+STATS_DIR = os.path.join(BASE_DIR, "stats")
 PREDICTIONS_INPUT = os.path.join(ODDS_DIR, "predictions_latest.json")
 KALSHI_INPUT = os.path.join(ODDS_DIR, "kalshi_latest.json")
 HISTORY_OUTPUT = os.path.join(STATS_DIR, "prediction_history.json")

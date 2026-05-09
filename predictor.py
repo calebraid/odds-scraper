@@ -10,9 +10,13 @@ from features import (
 )
 from model import predict
 
-ODDS_DIR = os.getenv("ODDS_DIR", "odds")
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+ODDS_DIR  = os.path.join(BASE_DIR, "odds")
+STATS_DIR = os.path.join(BASE_DIR, "stats")
 KALSHI_INPUT = os.path.join(ODDS_DIR, "kalshi_latest.json")
 PREDICTIONS_OUTPUT = os.path.join(ODDS_DIR, "predictions_latest.json")
+print(f"[predictor] reading stats from: {os.path.abspath(STATS_DIR)}")
+print(f"[predictor] reading/writing odds to: {os.path.abspath(ODDS_DIR)}")
 
 PREDICTABLE_TYPES = {"winner", "2h_winner", "spread", "series_spread", "total", "team_total"}
 

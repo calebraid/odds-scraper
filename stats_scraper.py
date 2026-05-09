@@ -39,10 +39,12 @@ from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
 from nba_api.stats.static import teams as nba_teams  # static JSON, no HTTP call
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-STATS_DIR = os.getenv("STATS_DIR", "stats")
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+STATS_DIR  = os.path.join(BASE_DIR, "stats")
 CACHE_FILE = os.path.join(STATS_DIR, "boxscore_cache.json")
 REQUEST_TIMEOUT = 60
 PROXY = os.getenv("SCRAPER_PROXY", None)
+print(f"[stats] writing files to: {os.path.abspath(STATS_DIR)}")
 print(f"[stats] proxy configured: {bool(PROXY)}")
 print(f"[stats] SCRAPER_PROXY set: {'yes - ' + PROXY[:20] + '...' if PROXY else 'NO - will hit CDN directly'}")
 if PROXY:
@@ -456,10 +458,13 @@ def pull_cache_from_github() -> None:
         return
     try:
         _set_git_remote()
-        subprocess.run(["git", "pull"], check=True)
-        print("  [git] pulled latest cache from GitHub")
+        result = subprocess.run(["git", "pull", "--rebase"], capture_output=True)
+        if result.returncode == 0:
+            print("  [git] pulled latest cache from GitHub")
+        else:
+            print(f"  [git] pull failed (rc={result.returncode}): {result.stderr.decode()[:200]}")
     except Exception as e:
-        print(f"  [git] pull failed: {e}")
+        print(f"  [git] pull error: {e}")
 
 
 def push_cache_to_github(cache: dict) -> None:

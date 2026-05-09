@@ -4,8 +4,9 @@ import os
 import joblib
 import numpy as np
 
-MODELS_DIR = "models"
-STATS_DIR = "stats"
+_BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(_BASE_DIR, "models")
+STATS_DIR  = os.path.join(_BASE_DIR, "stats")
 MODEL_PATH = os.path.join(MODELS_DIR, "nba_model.pkl")
 FEATURE_IMPORTANCE_PATH = os.path.join(STATS_DIR, "feature_importance.json")
 
