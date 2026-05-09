@@ -10,7 +10,7 @@ import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-OUTPUT_DIR = os.getenv("ODDS_DIR", "/data")
+OUTPUT_DIR = os.getenv("ODDS_DIR", "odds")
 INTERVAL_SECONDS = 60
 KALSHI_OUTPUT = os.path.join(OUTPUT_DIR, "kalshi_latest.json")
 KALSHI_BASE = "https://external-api.kalshi.com"

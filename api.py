@@ -10,8 +10,8 @@ from fastapi.responses import JSONResponse, HTMLResponse
 
 app = FastAPI(title="Sports Odds API", version="2.0.0")
 
-ODDS_DIR = os.getenv("ODDS_DIR", "/data")
-STATS_DIR = os.getenv("STATS_DIR", "/data")
+ODDS_DIR = os.getenv("ODDS_DIR", "odds")
+STATS_DIR = os.getenv("STATS_DIR", "stats")
 
 RATE_LIMITS: dict[str, int] = {
     "free": 100,

@@ -27,6 +27,7 @@ Output files:
 import json
 import os
 import pkgutil
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -38,7 +39,7 @@ from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
 from nba_api.stats.static import teams as nba_teams  # static JSON, no HTTP call
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-STATS_DIR = os.getenv("STATS_DIR", "/data")
+STATS_DIR = os.getenv("STATS_DIR", "stats")
 CACHE_FILE = os.path.join(STATS_DIR, "boxscore_cache.json")
 REQUEST_TIMEOUT = 60
 PROXY = os.getenv("SCRAPER_PROXY", None)
@@ -47,6 +48,9 @@ print(f"[stats] SCRAPER_PROXY set: {'yes - ' + PROXY[:20] + '...' if PROXY else 
 if PROXY:
     os.environ["HTTPS_PROXY"] = PROXY
     os.environ["HTTP_PROXY"] = PROXY
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_REPO  = os.getenv("GITHUB_REPO", "")
 
 _live_modules = [
     m.name for m in pkgutil.iter_modules(_live_ep.__path__)
@@ -439,6 +443,42 @@ def _team_entry_from_sb(t: dict) -> dict:
     }
 
 
+# ── GitHub cache persistence ──────────────────────────────────────────────────
+
+def _set_git_remote() -> None:
+    url = f"https://{GITHUB_TOKEN}@github.com/{GITHUB_REPO}.git"
+    subprocess.run(["git", "remote", "set-url", "origin", url], check=True)
+
+
+def pull_cache_from_github() -> None:
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        print("  [git] GITHUB_TOKEN/GITHUB_REPO not set — skipping pull")
+        return
+    try:
+        _set_git_remote()
+        subprocess.run(["git", "pull"], check=True)
+        print("  [git] pulled latest cache from GitHub")
+    except Exception as e:
+        print(f"  [git] pull failed: {e}")
+
+
+def push_cache_to_github(cache: dict) -> None:
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return
+    try:
+        subprocess.run(["git", "config", "user.email", "bot@nba-predictor.com"], check=True)
+        subprocess.run(["git", "config", "user.name", "NBA Bot"], check=True)
+        _set_git_remote()
+        subprocess.run(["git", "add", CACHE_FILE], check=True)
+        result = subprocess.run(["git", "diff", "--cached", "--quiet"])
+        if result.returncode != 0:
+            subprocess.run(["git", "commit", "-m", f"cache: {len(cache)} games stored"], check=True)
+            subprocess.run(["git", "push"], check=True)
+            print(f"  [git] cache pushed to GitHub ({len(cache)} games)")
+    except Exception as e:
+        print(f"  [git] cache push failed: {e}")
+
+
 # ── Playoff cache backfill ────────────────────────────────────────────────────
 
 def _backfill_playoff_cache(cache: dict, limit: int = 60) -> int:
@@ -672,8 +712,9 @@ def run_once():
     save_json("player_stats.json", all_players)
     print(f"  player_stats: {len(cached_players)} from cache + {len(extra)} live-only")
 
-    # ── 8. Save updated cache ──────────────────────────────────────────────────
+    # ── 8. Save updated cache and push to GitHub ──────────────────────────────
     _save_cache(cache)
+    push_cache_to_github(cache)
 
     # ── 9. Empty stubs ─────────────────────────────────────────────────────────
     save_json("player_stats_advanced.json", [])
@@ -684,6 +725,7 @@ def run_once():
 
 def run_loop(interval_seconds: int = 3600):
     print(f"[stats] starting  |  interval={interval_seconds}s")
+    pull_cache_from_github()
     while True:
         try:
             run_once()

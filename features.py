@@ -3,7 +3,7 @@ import math
 import os
 import re
 
-_STATS_DIR = os.getenv("STATS_DIR", "/data")
+_STATS_DIR = os.getenv("STATS_DIR", "stats")
 
 TEAM_MAP: dict[str, str] = {
     "atlanta": "Atlanta Hawks",

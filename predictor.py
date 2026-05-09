@@ -10,7 +10,7 @@ from features import (
 )
 from model import predict
 
-ODDS_DIR = os.getenv("ODDS_DIR", "/data")
+ODDS_DIR = os.getenv("ODDS_DIR", "odds")
 KALSHI_INPUT = os.path.join(ODDS_DIR, "kalshi_latest.json")
 PREDICTIONS_OUTPUT = os.path.join(ODDS_DIR, "predictions_latest.json")
 
