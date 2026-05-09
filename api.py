@@ -1035,7 +1035,7 @@ function buildFilters(byType) {
   document.getElementById("filter-tabs").innerHTML = TABS.map(function(t) {
     const cnt = t.k === "all" ? preds.length : (byType[t.k] || 0);
     if (t.k !== "all" && cnt === 0) return "";
-    return "<button class='tab-btn" + (activeFilter===t.k?" active":"") + "' onclick='setFilter("" + t.k + "")'>"
+    return "<button class='tab-btn" + (activeFilter===t.k?" active":"") + "' data-k='" + t.k + "' onclick='setFilter(this.dataset.k)'>"
       + t.l + "<span class='tab-count'>" + cnt + "</span></button>";
   }).join("");
 }
