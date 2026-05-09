@@ -873,6 +873,8 @@ td{padding:11px 16px;vertical-align:middle}
 .bet-win-indicator{display:inline-block;margin-top:8px;padding:3px 10px;border-radius:5px;font-size:11px;font-weight:700}
 .win-good{background:rgba(74,222,128,0.14);color:var(--green)}
 .win-pass{background:rgba(255,255,255,0.06);color:var(--muted)}
+.wp-val{font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:700}
+.wp-high{color:var(--green)}.wp-mid{color:var(--amber)}.wp-low{color:var(--red)}
 
 footer{border-top:1px solid var(--border);padding:20px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;max-width:1440px;margin:0 auto}
 .f-items{display:flex;gap:20px;flex-wrap:wrap}
@@ -1035,8 +1037,8 @@ function winProbHtml(p) {
   const wp = p.our_win_prob;
   if (wp == null) return "<span class='edge-nil'>—</span>";
   const pct = Math.round(wp * 100);
-  const col = pct >= 60 ? "var(--green)" : pct <= 40 ? "var(--red)" : "var(--amber)";
-  return "<span style='font-family:\"JetBrains Mono\",monospace;font-size:13px;font-weight:700;color:" + col + "'>" + pct + "%</span>";
+  const cls = pct >= 60 ? "wp-high" : pct <= 40 ? "wp-low" : "wp-mid";
+  return "<span class='wp-val " + cls + "'>" + pct + "%</span>";
 }
 
 function renderRow(p) {
