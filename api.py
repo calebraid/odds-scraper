@@ -1,5 +1,6 @@
 import json
 import os
+import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Annotated
 
@@ -297,72 +298,101 @@ def get_predictions_edge(auth: Annotated[dict, Depends(authenticate)], response:
 
 @app.get("/api/predictions", summary="Raw predictions for the dashboard (no auth required)")
 def api_predictions_raw():
-    result: dict = {
-        "generated_at": None,
+    _empty = {
+        "predictions": [],
+        "accuracy": {},
+        "system": {"status": "starting", "cache_size": 0, "last_scrape": None, "proxy_configured": False},
         "count": 0,
         "by_type": {},
-        "predictions": [],
-        "accuracy": None,
-        "system": {
-            "cache_size": 0,
-            "last_scrape": None,
-            "proxy_configured": bool(os.environ.get("SCRAPER_PROXY")),
-        },
+        "generated_at": None,
     }
-
-    pred_path = os.path.join(ODDS_DIR, "predictions_latest.json")
-    if os.path.exists(pred_path):
-        with open(pred_path, encoding="utf-8") as f:
-            pred_data = json.load(f)
-        result["generated_at"] = pred_data.get("generated_at")
-        result["count"] = pred_data.get("count", 0)
-        result["by_type"] = pred_data.get("by_type", {})
-        for p in pred_data.get("predictions", []):
-            features = p.get("features_snapshot") or {}
-            result["predictions"].append({
-                "ticker": p.get("ticker"),
-                "event_ticker": p.get("event_ticker"),
-                "market_type": p.get("market_type"),
-                "title": p.get("title"),
-                "yes_team": p.get("yes_team"),
-                "no_team": p.get("no_team"),
-                "yes_ask": p.get("yes_ask"),
-                "no_ask": p.get("no_ask"),
-                "prediction": p.get("prediction"),
-                "confidence": p.get("confidence"),
-                "method": p.get("method"),
-                "predicted_value": p.get("predicted_value"),
-                "edge": features.get("edge"),
-                "our_win_prob": features.get("our_win_prob"),
-            })
-        result["predictions"].sort(key=lambda p: p.get("confidence") or 0, reverse=True)
-
-    hist_path = os.path.join(STATS_DIR, "prediction_history.json")
-    if os.path.exists(hist_path):
-        with open(hist_path, encoding="utf-8") as f:
-            hist = json.load(f)
-        result["accuracy"] = {
-            "accuracy_pct": hist.get("accuracy_pct"),
-            "total": hist.get("resolved_predictions", 0),
-            "correct": hist.get("correct", 0),
-            "edge_accuracy_pct": hist.get("edge_accuracy_pct"),
-            "positive_edge_total": hist.get("positive_edge_total", 0),
+    try:
+        result: dict = {
+            "generated_at": None,
+            "count": 0,
+            "by_type": {},
+            "predictions": [],
+            "accuracy": {},
+            "system": {
+                "cache_size": 0,
+                "last_scrape": None,
+                "proxy_configured": bool(os.environ.get("SCRAPER_PROXY")),
+            },
         }
 
-    cache_path = os.path.join(STATS_DIR, "boxscore_cache.json")
-    if os.path.exists(cache_path):
-        with open(cache_path, encoding="utf-8") as f:
-            cache = json.load(f)
-        result["system"]["cache_size"] = len(cache)
+        pred_path = os.path.join(ODDS_DIR, "predictions_latest.json")
+        if os.path.exists(pred_path):
+            try:
+                with open(pred_path, encoding="utf-8") as f:
+                    pred_data = json.load(f)
+                result["generated_at"] = pred_data.get("generated_at")
+                result["count"] = pred_data.get("count", 0)
+                result["by_type"] = pred_data.get("by_type", {})
+                for p in pred_data.get("predictions", []):
+                    features = p.get("features_snapshot") or {}
+                    result["predictions"].append({
+                        "ticker": p.get("ticker"),
+                        "event_ticker": p.get("event_ticker"),
+                        "market_type": p.get("market_type"),
+                        "title": p.get("title"),
+                        "yes_team": p.get("yes_team"),
+                        "no_team": p.get("no_team"),
+                        "yes_ask": p.get("yes_ask"),
+                        "no_ask": p.get("no_ask"),
+                        "prediction": p.get("prediction"),
+                        "confidence": p.get("confidence"),
+                        "method": p.get("method"),
+                        "predicted_value": p.get("predicted_value"),
+                        "edge": features.get("edge"),
+                        "our_win_prob": features.get("our_win_prob"),
+                    })
+                result["predictions"].sort(
+                    key=lambda p: float(p.get("confidence") or 0), reverse=True
+                )
+            except Exception as exc:
+                print(f"  /api/predictions: failed to read predictions_latest.json: {exc}")
 
-    today_path = os.path.join(STATS_DIR, "today_games.json")
-    if os.path.exists(today_path):
-        with open(today_path, encoding="utf-8") as f:
-            today_data = json.load(f)
-        if isinstance(today_data, list) and today_data:
-            result["system"]["last_scrape"] = today_data[0].get("updated_at")
+        hist_path = os.path.join(STATS_DIR, "prediction_history.json")
+        if os.path.exists(hist_path):
+            try:
+                with open(hist_path, encoding="utf-8") as f:
+                    hist = json.load(f)
+                result["accuracy"] = {
+                    "accuracy_pct": hist.get("accuracy_pct"),
+                    "total": hist.get("resolved_predictions", 0),
+                    "correct": hist.get("correct", 0),
+                    "edge_accuracy_pct": hist.get("edge_accuracy_pct"),
+                    "positive_edge_total": hist.get("positive_edge_total", 0),
+                }
+            except Exception as exc:
+                print(f"  /api/predictions: failed to read prediction_history.json: {exc}")
 
-    return JSONResponse(content=result)
+        cache_path = os.path.join(STATS_DIR, "boxscore_cache.json")
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, encoding="utf-8") as f:
+                    cache = json.load(f)
+                result["system"]["cache_size"] = len(cache)
+            except Exception as exc:
+                print(f"  /api/predictions: failed to read boxscore_cache.json: {exc}")
+
+        today_path = os.path.join(STATS_DIR, "today_games.json")
+        if os.path.exists(today_path):
+            try:
+                with open(today_path, encoding="utf-8") as f:
+                    today_data = json.load(f)
+                if isinstance(today_data, list) and today_data:
+                    result["system"]["last_scrape"] = today_data[0].get("updated_at")
+            except Exception as exc:
+                print(f"  /api/predictions: failed to read today_games.json: {exc}")
+
+        return JSONResponse(content=result)
+
+    except Exception as exc:
+        traceback.print_exc()
+        err = _empty.copy()
+        err["error"] = str(exc)
+        return JSONResponse(content=err)
 
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
@@ -372,7 +402,14 @@ def dashboard():
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def landing_page():
-    return HTMLResponse(content=_PREDICTIONS_DASHBOARD_HTML)
+    try:
+        return HTMLResponse(content=_PREDICTIONS_DASHBOARD_HTML)
+    except Exception as exc:
+        traceback.print_exc()
+        return HTMLResponse(
+            content=f"<h1>Dashboard Error</h1><pre>{exc}</pre>",
+            status_code=500,
+        )
 
 
 _DASHBOARD_HTML = """<!DOCTYPE html>
@@ -1024,11 +1061,23 @@ function setFilter(k) {
   buildTable();
 }
 
+function showTableMsg(icon, title, sub) {
+  document.getElementById("tbody").innerHTML =
+    "<tr><td colspan='7' style='padding:0'><div class='empty-state'>"
+    + "<div class='empty-icon'>" + icon + "</div>"
+    + "<div class='empty-title'>" + title + "</div>"
+    + "<div class='empty-sub'>" + sub + "</div>"
+    + "</div></td></tr>";
+}
+
 async function fetchData() {
+  var controller = new AbortController();
+  var tid = setTimeout(function() { controller.abort(); }, 10000);
   try {
-    const r = await fetch("/api/predictions");
-    if (!r.ok) throw new Error(r.status);
-    const d = await r.json();
+    var r = await fetch("/api/predictions", { signal: controller.signal });
+    clearTimeout(tid);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    var d = await r.json();
 
     preds = d.predictions || [];
 
@@ -1036,12 +1085,12 @@ async function fetchData() {
     document.getElementById("pred-count").textContent = preds.length + (preds.length===1?" prediction":" predictions");
 
     document.getElementById("s-markets").textContent = d.count || "—";
-    const bt = d.by_type || {};
-    const tc = Object.keys(bt).length;
+    var bt = d.by_type || {};
+    var tc = Object.keys(bt).length;
     document.getElementById("s-types").textContent    = tc || "—";
     document.getElementById("s-types-sub").textContent = tc + " market type" + (tc!==1?"s":"");
 
-    const acc = d.accuracy;
+    var acc = d.accuracy;
     if (acc && acc.accuracy_pct != null) {
       document.getElementById("s-acc").textContent     = acc.accuracy_pct.toFixed(1) + "%";
       document.getElementById("s-acc-sub").textContent = acc.correct + "/" + acc.total + " correct";
@@ -1060,7 +1109,7 @@ async function fetchData() {
     buildFilters(bt);
     buildTable();
 
-    const sys = d.system || {};
+    var sys = d.system || {};
     document.getElementById("f-cache").textContent  = sys.cache_size || "0";
     document.getElementById("f-scrape").textContent = sys.last_scrape ? fmtAge(sys.last_scrape) : "—";
     document.getElementById("f-proxy").textContent  = sys.proxy_configured ? "configured" : "direct";
@@ -1068,10 +1117,16 @@ async function fetchData() {
     document.getElementById("fd-cache").className   = "f-dot" + ((sys.cache_size||0)>0 ? " on" : "");
 
     document.getElementById("live-status").textContent = "live";
-    document.getElementById("loading").classList.add("gone");
+    if (d.error) {
+      showTableMsg("&#9888;", "Backend error", esc(d.error));
+    }
   } catch(e) {
-    console.error("fetchData error:", e);
+    clearTimeout(tid);
+    console.error("fetchData:", e);
+    var msg = e.name === "AbortError" ? "Request timed out (10s)" : esc(String(e));
     document.getElementById("live-status").textContent = "error";
+    showTableMsg("&#9888;", "Could not load predictions", msg + " — will retry in 30s");
+  } finally {
     document.getElementById("loading").classList.add("gone");
   }
 }
@@ -1098,6 +1153,8 @@ function scheduleRefresh() {
   }, 30000);
 }
 
+// Show empty state immediately so spinner is never the final state
+showTableMsg("&#9200;", "No predictions yet — system is warming up", "Auto-refreshes every 30 seconds");
 fetchData().then(function() { startCountdown(); scheduleRefresh(); });
 </script>
 </body>
