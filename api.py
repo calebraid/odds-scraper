@@ -296,6 +296,41 @@ def get_predictions_edge(auth: Annotated[dict, Depends(authenticate)], response:
     return JSONResponse(content=result, headers=dict(response.headers))
 
 
+@app.get("/debug/markets", summary="Raw kalshi_latest.json grouped by market type (no auth)")
+def debug_markets():
+    path = os.path.join(ODDS_DIR, "kalshi_latest.json")
+    if not os.path.exists(path):
+        return JSONResponse(content={"error": "kalshi_latest.json not found — scraper has not run yet"})
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        game_markets = data.get("game_markets", [])
+        by_type: dict[str, list] = {}
+        for m in game_markets:
+            mt = m.get("market_type", "unknown")
+            by_type.setdefault(mt, []).append({
+                "ticker":    m.get("ticker"),
+                "title":     m.get("title"),
+                "yes_team":  m.get("yes_team"),
+                "no_team":   m.get("no_team"),
+                "yes_ask":   m.get("yes_ask"),
+                "status":    m.get("status"),
+            })
+        return JSONResponse(content={
+            "scraped_at":         data.get("scraped_at"),
+            "futures_count":      data.get("futures_count", 0),
+            "game_markets_total": len(game_markets),
+            "type_counts":        {mt: len(mkts) for mt, mkts in sorted(by_type.items())},
+            "by_type": {
+                mt: {"count": len(mkts), "sample": mkts[:3]}
+                for mt, mkts in sorted(by_type.items())
+            },
+        })
+    except Exception as exc:
+        traceback.print_exc()
+        return JSONResponse(content={"error": str(exc)}, status_code=500)
+
+
 @app.get("/api/predictions", summary="Raw predictions for the dashboard (no auth required)")
 def api_predictions_raw():
     _empty = {
@@ -1070,11 +1105,15 @@ function renderRow(p) {
     + "</tr>";
 }
 
+// Tabs that are always visible regardless of count (for debugging connectivity)
+const ALWAYS_VISIBLE = new Set(["all", "winner"]);
+
 function buildFilters(byType) {
   document.getElementById("filter-tabs").innerHTML = TABS.map(function(t) {
     const cnt = t.k === "all" ? preds.length : (byType[t.k] || 0);
-    if (t.k !== "all" && cnt === 0) return "";
-    return "<button class='tab-btn" + (activeFilter===t.k?" active":"") + "' data-k='" + t.k + "' onclick='setFilter(this.dataset.k)'>"
+    if (!ALWAYS_VISIBLE.has(t.k) && cnt === 0) return "";
+    const dimAttr = cnt === 0 ? " style='opacity:0.45;cursor:default'" : "";
+    return "<button class='tab-btn" + (activeFilter===t.k?" active":"") + "' data-k='" + t.k + "' onclick='setFilter(this.dataset.k)'" + dimAttr + ">"
       + t.l + "<span class='tab-count'>" + cnt + "</span></button>";
   }).join("");
 }

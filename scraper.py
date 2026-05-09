@@ -40,6 +40,10 @@ GAME_SERIES = {
     "KXNBA3D": "triple_double",
 }
 
+# Alternative series tickers to try when KXNBAA returns 0 markets.
+# Kalshi may rename series between seasons or for playoffs.
+_WINNER_FALLBACK_SERIES = ["KXNBAWIN", "KXNBAWINNER", "KXNBAGAME", "KXNBA"]
+
 
 def make_kalshi_headers(method: str, path: str) -> dict:
     ts = str(int(time.time() * 1000))
@@ -54,6 +58,86 @@ def make_kalshi_headers(method: str, path: str) -> dict:
         "KALSHI-ACCESS-TIMESTAMP": ts,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
     }
+
+
+async def _discover_nba_series(client: httpx.AsyncClient) -> list[str]:
+    """Fetch /series and log every NBA-related series ticker.
+
+    Called once per scrape run for visibility — the result guides which
+    series tickers to use for game winner fetches.
+    """
+    path = "/trade-api/v2/series"
+    try:
+        resp = await client.get(
+            f"{KALSHI_BASE}{path}",
+            headers=make_kalshi_headers("GET", path),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        all_series = data.get("series", [])
+        nba = [
+            s for s in all_series
+            if "NBA" in (s.get("ticker") or "").upper()
+            or "NBA" in (s.get("title") or "").upper()
+        ]
+        if nba:
+            print(f"  [series] {len(nba)} NBA series found:")
+            for s in nba:
+                print(f"    ticker={s.get('ticker')}  title={s.get('title')}")
+        else:
+            print(f"  [series] 0 NBA series found in {len(all_series)} total | "
+                  f"sample: {[s.get('ticker') for s in all_series[:8]]}")
+        return [s.get("ticker") for s in nba if s.get("ticker")]
+    except Exception as exc:
+        print(f"  [series] ERROR: {exc}")
+        return []
+
+
+async def _fetch_winner_markets_with_debug(client: httpx.AsyncClient) -> list[dict]:
+    """Try KXNBAA and fallback tickers to find NBA winner markets.
+
+    Logs the raw response preview so we can diagnose empty results.
+    Returns the first non-empty result list found.
+    """
+    path = "/trade-api/v2/markets"
+    all_tickers = ["KXNBAA"] + _WINNER_FALLBACK_SERIES
+
+    for ticker in all_tickers:
+        for status_val in [None, "open", "active"]:
+            params: dict = {"series_ticker": ticker, "limit": 200}
+            if status_val is not None:
+                params["status"] = status_val
+            try:
+                resp = await client.get(
+                    f"{KALSHI_BASE}{path}",
+                    params=params,
+                    headers=make_kalshi_headers("GET", path),
+                )
+                data = resp.json()
+                markets = data.get("markets") or []
+                label = f"series_ticker={ticker} status={status_val}"
+                print(f"  [KXNBAA-debug] {label}: {len(markets)} market(s) | "
+                      f"raw={str(data)[:300]}")
+                if markets:
+                    print(f"  [KXNBAA-debug] SUCCESS with {label}, using these markets")
+                    return markets
+            except Exception as exc:
+                print(f"  [KXNBAA-debug] series_ticker={ticker} status={status_val}: ERROR {exc}")
+
+    # Last-resort: try fetching by tickers= param (looks up a specific ticker, not series)
+    try:
+        params = {"tickers": "KXNBAA", "limit": 5}
+        resp = await client.get(
+            f"{KALSHI_BASE}{path}",
+            params=params,
+            headers=make_kalshi_headers("GET", path),
+        )
+        data = resp.json()
+        print(f"  [KXNBAA-debug] tickers=KXNBAA lookup: {str(data)[:300]}")
+    except Exception as exc:
+        print(f"  [KXNBAA-debug] tickers=KXNBAA lookup: ERROR {exc}")
+
+    return []
 
 
 async def fetch_series(
@@ -166,18 +250,26 @@ async def scrape_kalshi_nba() -> dict:
     if not _KEY_ID:
         raise RuntimeError("KALSHI_API_KEY environment variable not set")
 
-    all_series = [FUTURES_SERIES] + list(GAME_SERIES.keys())
+    # Non-winner series are fetched concurrently with status=open.
+    non_winner_series = {k: v for k, v in GAME_SERIES.items() if k != "KXNBAA"}
+    all_series = [FUTURES_SERIES] + list(non_winner_series.keys())
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        results = await asyncio.gather(
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Run non-winner fetches + series discovery concurrently
+        results_and_debug = await asyncio.gather(
             *[
                 fetch_series(client, s, status=_SERIES_STATUS.get(s, "open"))
                 for s in all_series
             ],
+            _discover_nba_series(client),
+            _fetch_winner_markets_with_debug(client),
             return_exceptions=True,
         )
 
-    futures_raw, *game_raws = results
+    # Last two results are discovery (ignored) and winner markets
+    *non_winner_results, _series_discovery, winner_raw = results_and_debug
+
+    futures_raw, *game_raws = non_winner_results
 
     if isinstance(futures_raw, Exception):
         print(f"  ERROR fetching {FUTURES_SERIES}: {futures_raw}")
@@ -186,13 +278,21 @@ async def scrape_kalshi_nba() -> dict:
         futures = [parse_market(m, "futures") for m in futures_raw]
 
     game_markets: list[dict] = []
-    for series_ticker, raw in zip(GAME_SERIES.keys(), game_raws):
-        mtype = GAME_SERIES[series_ticker]
+    for series_ticker, raw in zip(non_winner_series.keys(), game_raws):
+        mtype = non_winner_series[series_ticker]
         if isinstance(raw, Exception):
             print(f"  ERROR fetching {series_ticker} ({mtype}): {raw}")
         else:
             game_markets.extend(parse_market(m, mtype) for m in raw)
             print(f"  {series_ticker} ({mtype}): {len(raw)} market(s)")
+
+    # Winner markets (KXNBAA) — result from debug/fallback fetch
+    if isinstance(winner_raw, Exception):
+        print(f"  ERROR fetching winner markets: {winner_raw}")
+        winner_raw = []
+    winner_markets = [parse_market(m, "winner") for m in (winner_raw or [])]
+    game_markets.extend(winner_markets)
+    print(f"  KXNBAA (winner): {len(winner_markets)} market(s)")
 
     _pair_winner_markets(game_markets)
 
