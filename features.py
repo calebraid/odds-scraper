@@ -72,6 +72,41 @@ def _load_players() -> list[dict]:
     return data if isinstance(data, list) else data.get("players", [])
 
 
+def _load_today_games() -> list[dict]:
+    path = os.path.join(_STATS_DIR, "today_games.json")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else []
+
+
+def _determine_home_away(t1: dict, t2: dict, today_games: list[dict]) -> float:
+    """Return 1.0 if t1 is the home team, 0.0 if away, 0.5 if not found."""
+    t1_id   = t1.get("team_id")
+    t2_id   = t2.get("team_id")
+    t1_abbr = (t1.get("abbreviation") or "").upper()
+    t2_abbr = (t2.get("abbreviation") or "").upper()
+
+    for game in today_games:
+        h_id   = game.get("home_team_id")
+        a_id   = game.get("away_team_id")
+        h_abbr = (game.get("home_team_abbrev") or "").upper()
+        a_abbr = (game.get("away_team_abbrev") or "").upper()
+
+        t1_home = (t1_id and t1_id == h_id) or (t1_abbr and t1_abbr == h_abbr)
+        t2_away = (t2_id and t2_id == a_id) or (t2_abbr and t2_abbr == a_abbr)
+        t1_away = (t1_id and t1_id == a_id) or (t1_abbr and t1_abbr == a_abbr)
+        t2_home = (t2_id and t2_id == h_id) or (t2_abbr and t2_abbr == h_abbr)
+
+        if t1_home and t2_away:
+            return 1.0
+        if t1_away and t2_home:
+            return 0.0
+
+    return 0.5
+
+
 def find_team(name: str, teams: list[dict]) -> dict | None:
     if not name:
         return None
@@ -222,6 +257,17 @@ def build_features(
     t1_streak     = safe(t1.get("streak"), 0.0)
     t2_streak     = safe(t2.get("streak"), 0.0)
 
+    # Home/away context from today's schedule
+    today_games    = _load_today_games()
+    is_home_team   = _determine_home_away(t1, t2, today_games)
+    # If t1 is home use their home record; if away use their road record; if unknown use overall
+    if is_home_team == 1.0:
+        home_road_record_win_pct = t1_home_pct
+    elif is_home_team == 0.0:
+        home_road_record_win_pct = t1_away_pct
+    else:
+        home_road_record_win_pct = t1_win_pct
+
     # Player features
     t1_pf = _player_features(t1.get("team_id"), players)
     t2_pf = _player_features(t2.get("team_id"), players)
@@ -282,6 +328,19 @@ def build_features(
         "market_line": market_line_val,
         "our_win_prob": our_win_prob,
         "edge": edge,
+        # Moneyline / winner-market specific features
+        "is_home_team": is_home_team,
+        "home_road_record_win_pct": home_road_record_win_pct,
+        "home_win_pct": t1_home_pct,
+        "away_win_pct": t2_away_pct,
+        "home_e_net_rating": t1_net,
+        "away_e_net_rating": t2_net,
+        "net_rating_diff": t1_net - t2_net,
+        "home_last_10_win_pct": t1_last10_pct,
+        "away_last_10_win_pct": t2_last10_pct,
+        "home_pts_per_game": t1_pts,
+        "away_pts_per_game": t2_pts,
+        "pts_differential": t1_pts_diff,
         # Retained for baseline functions and backward compat
         "kalshi_line": _kalshi_line(market),
         "t1_ppg": t1_pts, "t2_ppg": t2_pts,

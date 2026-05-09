@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 
@@ -55,14 +56,24 @@ def make_kalshi_headers(method: str, path: str) -> dict:
     }
 
 
-async def fetch_series(client: httpx.AsyncClient, series_ticker: str) -> list[dict]:
-    """Fetch all open markets for one series, handling cursor pagination."""
+async def fetch_series(
+    client: httpx.AsyncClient,
+    series_ticker: str,
+    status: str | None = "open",
+) -> list[dict]:
+    """Fetch markets for one series with cursor pagination.
+
+    Pass status=None to skip the status filter (needed for KXNBAA winner markets
+    which Kalshi may not mark as 'open' even when the game is upcoming).
+    """
     markets: list[dict] = []
     cursor: str | None = None
     path = "/trade-api/v2/markets"
 
     while True:
-        params: dict = {"status": "open", "series_ticker": series_ticker, "limit": 200}
+        params: dict = {"series_ticker": series_ticker, "limit": 200}
+        if status is not None:
+            params["status"] = status
         if cursor:
             params["cursor"] = cursor
 
@@ -82,24 +93,70 @@ async def fetch_series(client: httpx.AsyncClient, series_ticker: str) -> list[di
     return markets
 
 
+_WINNER_TITLE_RE = re.compile(r"Will (?:the )?(.+?) win\?", re.IGNORECASE)
+
+
 def parse_market(m: dict, market_type: str) -> dict:
+    yes_team = (m.get("yes_sub_title") or "").strip() or None
+    no_team  = (m.get("no_sub_title")  or "").strip() or None
+
+    # For winner markets Kalshi sometimes leaves subtitles empty; parse the title.
+    # Title format: "Will the Indiana Pacers win?" or "Will Indiana Pacers win?"
+    if market_type == "winner" and not yes_team:
+        hit = _WINNER_TITLE_RE.search(m.get("title") or "")
+        if hit:
+            yes_team = hit.group(1).strip()
+
+    # Filter out generic non-team strings in no_team
+    if no_team and no_team.lower() in {"no", "no team", "other"}:
+        no_team = None
+
     return {
-        "ticker": m.get("ticker"),
-        "event_ticker": m.get("event_ticker"),
-        "market_type": market_type,
-        "title": m.get("title"),
-        "yes_team": m.get("yes_sub_title"),
-        "no_team": m.get("no_sub_title"),
-        "yes_bid": m.get("yes_bid_dollars"),
-        "yes_ask": m.get("yes_ask_dollars"),
-        "no_bid": m.get("no_bid_dollars"),
-        "no_ask": m.get("no_ask_dollars"),
-        "last_price": m.get("last_price_dollars"),
-        "close_time": m.get("close_time"),
-        "volume": m.get("volume_fp"),
+        "ticker":        m.get("ticker"),
+        "event_ticker":  m.get("event_ticker"),
+        "market_type":   market_type,
+        "title":         m.get("title"),
+        "yes_team":      yes_team,
+        "no_team":       no_team,
+        "yes_bid":       m.get("yes_bid_dollars"),
+        "yes_ask":       m.get("yes_ask_dollars"),
+        "no_bid":        m.get("no_bid_dollars"),
+        "no_ask":        m.get("no_ask_dollars"),
+        "last_price":    m.get("last_price_dollars"),
+        "close_time":    m.get("close_time"),
+        "volume":        m.get("volume_fp"),
         "open_interest": m.get("open_interest_fp"),
-        "status": m.get("status"),
+        "status":        m.get("status"),
     }
+
+
+def _pair_winner_markets(game_markets: list[dict]) -> None:
+    """For winner markets that share an event_ticker, cross-populate no_team.
+
+    Kalshi creates two winner markets per game — one per team.  Both belong to the
+    same event_ticker.  If one market has yes_team but no no_team, fill in no_team
+    from the other market's yes_team.
+    """
+    by_event: dict[str, list[dict]] = {}
+    for m in game_markets:
+        if m.get("market_type") == "winner":
+            et = m.get("event_ticker") or m.get("ticker", "")
+            by_event.setdefault(et, []).append(m)
+
+    for mkts in by_event.values():
+        if len(mkts) == 2:
+            a, b = mkts
+            if not a.get("no_team") and b.get("yes_team"):
+                a["no_team"] = b["yes_team"]
+            if not b.get("no_team") and a.get("yes_team"):
+                b["no_team"] = a["yes_team"]
+
+
+# Winner markets may not carry status="open" even when the game is upcoming,
+# so skip the status filter for KXNBAA to avoid getting 0 results.
+_SERIES_STATUS: dict[str, str | None] = {
+    "KXNBAA": None,  # winner — fetch regardless of status
+}
 
 
 async def scrape_kalshi_nba() -> dict:
@@ -113,7 +170,10 @@ async def scrape_kalshi_nba() -> dict:
 
     async with httpx.AsyncClient(timeout=15) as client:
         results = await asyncio.gather(
-            *[fetch_series(client, s) for s in all_series],
+            *[
+                fetch_series(client, s, status=_SERIES_STATUS.get(s, "open"))
+                for s in all_series
+            ],
             return_exceptions=True,
         )
 
@@ -133,6 +193,8 @@ async def scrape_kalshi_nba() -> dict:
         else:
             game_markets.extend(parse_market(m, mtype) for m in raw)
             print(f"  {series_ticker} ({mtype}): {len(raw)} market(s)")
+
+    _pair_winner_markets(game_markets)
 
     return {"futures": futures, "game_markets": game_markets}
 

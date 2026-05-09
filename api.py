@@ -819,6 +819,7 @@ tbody tr:last-child{border-bottom:none}
 tbody tr.row-yes{background:var(--row-yes)}
 tbody tr.row-no{background:var(--row-no)}
 tbody tr.row-neutral{background:var(--row-neutral)}
+tbody tr.bet-highlight td:nth-child(6){background:rgba(74,222,128,0.06)}
 tbody tr:hover{filter:brightness(1.18)}
 td{padding:11px 16px;vertical-align:middle}
 
@@ -855,6 +856,23 @@ td{padding:11px 16px;vertical-align:middle}
 .empty-icon{font-size:40px;margin-bottom:12px;opacity:0.35}
 .empty-title{font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px}
 .empty-sub{font-size:13px;color:var(--muted);margin-top:6px}
+
+.section-label{font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.best-bets-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin-bottom:24px}
+.bet-card{background:var(--surface);border:2px solid transparent;border-radius:14px;padding:16px 18px;position:relative}
+.bet-card.bet-pos{border-color:rgba(74,222,128,0.28);background:rgba(74,222,128,0.035)}
+.bet-card.bet-neg{border-color:rgba(248,113,113,0.28);background:rgba(248,113,113,0.035)}
+.bet-edge-badge{position:absolute;top:12px;right:14px;padding:3px 9px;border-radius:6px;font-size:11px;font-weight:800;font-family:"JetBrains Mono",monospace}
+.badge-pos{background:rgba(74,222,128,0.14);color:var(--green)}
+.badge-neg{background:rgba(248,113,113,0.14);color:var(--red)}
+.bet-title{font-size:13px;font-weight:600;margin-bottom:4px;line-height:1.35;color:var(--text);padding-right:64px}
+.bet-meta{font-size:11px;color:var(--muted);margin-bottom:12px}
+.bet-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.bet-stat-lbl{font-size:9px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
+.bet-stat-val{font-size:16px;font-weight:800;font-family:"JetBrains Mono",monospace;line-height:1}
+.bet-win-indicator{display:inline-block;margin-top:8px;padding:3px 10px;border-radius:5px;font-size:11px;font-weight:700}
+.win-good{background:rgba(74,222,128,0.14);color:var(--green)}
+.win-pass{background:rgba(255,255,255,0.06);color:var(--muted)}
 
 footer{border-top:1px solid var(--border);padding:20px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;max-width:1440px;margin:0 auto}
 .f-items{display:flex;gap:20px;flex-wrap:wrap}
@@ -919,6 +937,11 @@ footer{border-top:1px solid var(--border);padding:20px 24px;display:flex;align-i
     </div>
   </div>
 
+  <div id="best-bets-section" style="display:none">
+    <div class="section-label">Best Bets &mdash; Highest Edge vs Kalshi</div>
+    <div class="best-bets-grid" id="best-bets-grid"></div>
+  </div>
+
   <div class="controls-bar">
     <div class="filter-tabs" id="filter-tabs"></div>
     <div class="next-refresh" id="next-refresh"></div>
@@ -932,6 +955,7 @@ footer{border-top:1px solid var(--border);padding:20px 24px;display:flex;align-i
           <th>Market</th>
           <th>Call</th>
           <th>Confidence</th>
+          <th>Win Prob</th>
           <th>Edge</th>
           <th>Kalshi</th>
           <th>Method</th>
@@ -1007,6 +1031,14 @@ function edgeHtml(e) {
   return "<span class='edge-nil'>~0</span>";
 }
 
+function winProbHtml(p) {
+  const wp = p.our_win_prob;
+  if (wp == null) return "<span class='edge-nil'>—</span>";
+  const pct = Math.round(wp * 100);
+  const col = pct >= 60 ? "var(--green)" : pct <= 40 ? "var(--red)" : "var(--amber)";
+  return "<span style='font-family:\"JetBrains Mono\",monospace;font-size:13px;font-weight:700;color:" + col + "'>" + pct + "%</span>";
+}
+
 function renderRow(p) {
   const mtype = p.market_type || "";
   const badge = BADGE[mtype] || "b-other";
@@ -1015,17 +1047,22 @@ function renderRow(p) {
   const cc    = confColor(conf);
   const teams = (p.yes_team && p.no_team) ? esc(p.yes_team) + " vs " + esc(p.no_team) : "";
   const price = p.yes_ask != null ? Math.round(parseFloat(p.yes_ask) * 100) + "&cent;" : "—";
+  const edgeVal = parseFloat(p.edge);
+  const isGoodBet = !isNaN(edgeVal) && edgeVal > 0.05;
   const mHtml = p.method === "ml_model"
     ? "<span class='method-ml'>ML</span>"
+    : p.method === "formula"
+    ? "<span class='method-ml' style='background:rgba(251,191,36,0.12);color:var(--amber)'>FML</span>"
     : "<span class='method-base'>BASE</span>";
-  return "<tr class='" + rowCls(p) + "'>"
+  return "<tr class='" + rowCls(p) + (isGoodBet ? " bet-highlight" : "") + "'>"
     + "<td><span class='type-badge " + badge + "'>" + label + "</span></td>"
     + "<td class='title-cell'><div class='title-main'>" + esc(p.title||"—") + "</div>"
     + (teams ? "<div class='title-teams'>" + teams + "</div>" : "") + "</td>"
     + "<td><span class='pred-pill " + (p.prediction==="YES"?"pred-yes":"pred-no") + "'>" + esc(p.prediction||"—") + "</span></td>"
     + "<td><div class='conf-wrap'><div class='conf-bar'><div class='conf-fill' style='width:" + Math.min(100,conf) + "%;background:" + cc + "'></div></div>"
     + "<span class='conf-pct' style='color:" + cc + "'>" + conf.toFixed(0) + "%</span></div></td>"
-    + "<td>" + edgeHtml(p.edge) + "</td>"
+    + "<td>" + winProbHtml(p) + "</td>"
+    + "<td>" + edgeHtml(p.edge) + (isGoodBet ? " <span style='font-size:10px;color:var(--green)'>&#10003;</span>" : "") + "</td>"
     + "<td><span class='price-val'>" + price + "</span></td>"
     + "<td>" + mHtml + "</td>"
     + "</tr>";
@@ -1044,7 +1081,7 @@ function buildTable() {
   const rows = activeFilter === "all" ? preds : preds.filter(function(p){ return p.market_type === activeFilter; });
   if (!rows.length) {
     document.getElementById("tbody").innerHTML =
-      "<tr><td colspan='7' style='padding:0'><div class='empty-state'>"
+      "<tr><td colspan='8' style='padding:0'><div class='empty-state'>"
       + "<div class='empty-icon'>&#128202;</div>"
       + "<div class='empty-title'>" + (activeFilter==="all" ? "No predictions yet" : "No predictions for this type") + "</div>"
       + "<div class='empty-sub'>Waiting for the predictor to run&hellip;</div></div></td></tr>";
@@ -1061,9 +1098,51 @@ function setFilter(k) {
   buildTable();
 }
 
+function buildBestBets(predictions) {
+  var section = document.getElementById("best-bets-section");
+  var grid    = document.getElementById("best-bets-grid");
+  var scored  = predictions.map(function(p) {
+    var e = p.edge;
+    var absE = (e != null && !isNaN(parseFloat(e))) ? Math.abs(parseFloat(e)) : 0;
+    return {p: p, absE: absE};
+  }).filter(function(x) { return x.absE >= 0.04; });
+  scored.sort(function(a, b) { return b.absE - a.absE; });
+  var top = scored.slice(0, 5);
+  if (!top.length) { section.style.display = "none"; return; }
+  section.style.display = "";
+  grid.innerHTML = top.map(function(x) {
+    var p = x.p;
+    var edge = parseFloat(p.edge);
+    var isPos = edge > 0;
+    var edgePct = (edge * 100).toFixed(1);
+    var conf = p.confidence || 50;
+    var kalshi = p.yes_ask != null ? Math.round(parseFloat(p.yes_ask) * 100) : null;
+    var mtype = LABELS[p.market_type] || p.market_type || "";
+    var goodBet = isPos && edge > 0.05;
+    var wp = p.our_win_prob;
+    var wpStr = (wp != null && !isNaN(parseFloat(wp))) ? Math.round(parseFloat(wp) * 100) + "%" : "—";
+    return "<div class='bet-card " + (isPos ? "bet-pos" : "bet-neg") + "'>"
+      + "<div class='bet-edge-badge " + (isPos ? "badge-pos" : "badge-neg") + "'>"
+      + (isPos ? "+" : "") + edgePct + "pp</div>"
+      + "<div class='bet-title'>" + esc(p.title || "—") + "</div>"
+      + "<div class='bet-meta'>" + mtype
+      + (p.yes_team ? " &middot; " + esc(p.yes_team) : "")
+      + (p.no_team  ? " vs " + esc(p.no_team)  : "")
+      + "</div>"
+      + "<div class='bet-stats'>"
+      + "<div><div class='bet-stat-lbl'>Call</div><div class='bet-stat-val' style='color:" + (p.prediction==="YES"?"var(--green)":"var(--red)") + "'>" + esc(p.prediction || "—") + "</div></div>"
+      + "<div><div class='bet-stat-lbl'>Conf</div><div class='bet-stat-val'>" + conf.toFixed(0) + "%</div></div>"
+      + "<div><div class='bet-stat-lbl'>Win%</div><div class='bet-stat-val'>" + wpStr + "</div></div>"
+      + "<div><div class='bet-stat-lbl'>Kalshi</div><div class='bet-stat-val'>" + (kalshi != null ? kalshi + "&cent;" : "—") + "</div></div>"
+      + "</div>"
+      + (goodBet ? "<div class='bet-win-indicator win-good'>&#10003; Bet this</div>" : "<div class='bet-win-indicator win-pass'>Watch only</div>")
+      + "</div>";
+  }).join("");
+}
+
 function showTableMsg(icon, title, sub) {
   document.getElementById("tbody").innerHTML =
-    "<tr><td colspan='7' style='padding:0'><div class='empty-state'>"
+    "<tr><td colspan='8' style='padding:0'><div class='empty-state'>"
     + "<div class='empty-icon'>" + icon + "</div>"
     + "<div class='empty-title'>" + title + "</div>"
     + "<div class='empty-sub'>" + sub + "</div>"
@@ -1080,6 +1159,8 @@ async function fetchData() {
     var d = await r.json();
 
     preds = d.predictions || [];
+
+    buildBestBets(preds);
 
     document.getElementById("last-updated").textContent = d.generated_at ? "Updated " + fmtAge(d.generated_at) : "Awaiting first run";
     document.getElementById("pred-count").textContent = preds.length + (preds.length===1?" prediction":" predictions");
